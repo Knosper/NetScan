@@ -1,4 +1,5 @@
 # NetScan
+<img width="1124" height="508" alt="image" src="https://github.com/user-attachments/assets/3857e685-0286-49c7-9a44-9219bf166c8f" />
 
 Self-hosted HTTP network scanning and monitoring service written in C++14. NetScan combines an nmap-backed scanner, SQLite persistence, a REST API, and a browser UI for local network visibility.
 
