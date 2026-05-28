@@ -30,10 +30,10 @@ jobs:
             mingw-w64-x86_64-nodejs
 
       - name: Run Windows regression tests
-        run: make test-all
+        run: mingw32-make test-all
 
       - name: Build frontend + Windows release
-        run: make release-windows
+        run: mingw32-make release-windows
 
       - name: Install Inno Setup
         shell: pwsh
