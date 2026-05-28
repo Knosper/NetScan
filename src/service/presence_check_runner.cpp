@@ -77,10 +77,10 @@ private:
     bool ok_;
 };
 
-constexpr const char* STATUS_UP      = "up";
-constexpr const char* STATUS_DOWN    = "down";
-constexpr const char* STATUS_TIMEOUT = "timeout";
-constexpr const char* STATUS_ERROR   = "error";
+constexpr const char* PRESENCE_STATUS_UP      = "up";
+constexpr const char* PRESENCE_STATUS_DOWN    = "down";
+constexpr const char* PRESENCE_STATUS_TIMEOUT = "timeout";
+constexpr const char* PRESENCE_STATUS_ERROR   = "error";
 
 constexpr const char* CHECK_TYPE_PING = "ping";
 constexpr const char* CHECK_TYPE_TCP  = "tcp";
@@ -422,16 +422,16 @@ PresenceCheckResult evaluate_ping_result(const PresenceTracker& tracker,
                                          const PingExecution& execution)
 {
     if (execution.rc == 0)
-        return make_result(tracker, PresenceCheckSpec{STATUS_UP, execution.elapsed_ms, ""});
+        return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_UP, execution.elapsed_ms, ""});
     if (execution.elapsed_ms >= execution.timeout_threshold_ms)
-        return make_result(tracker, PresenceCheckSpec{STATUS_TIMEOUT, -1, "ping timed out"});
-    return make_result(tracker, PresenceCheckSpec{STATUS_DOWN, -1, "ping failed"});
+        return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_TIMEOUT, -1, "ping timed out"});
+    return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_DOWN, -1, "ping failed"});
 }
 
 PresenceCheckResult run_ping_check(const PresenceTracker& tracker, Logger* logger)
 {
     if (!is_safe_ping_target(tracker.target))
-        return make_result(tracker, PresenceCheckSpec{STATUS_ERROR, -1, "invalid ping target"});
+        return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_ERROR, -1, "invalid ping target"});
 
     const auto start = std::chrono::steady_clock::now();
     const PingCommand command = ping_command_for(tracker);
@@ -448,10 +448,10 @@ PresenceCheckResult run_tcp_check(const PresenceTracker& tracker)
     bool timed_out = false;
     const TcpEndpoint endpoint = {tracker.target, tracker.port, tracker.timeout_ms};
     if (connect_tcp(endpoint, timed_out))
-        return make_result(tracker, PresenceCheckSpec{STATUS_UP, elapsed_ms(start), ""});
+        return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_UP, elapsed_ms(start), ""});
     if (timed_out)
-        return make_result(tracker, PresenceCheckSpec{STATUS_TIMEOUT, -1, "tcp connect timed out"});
-    return make_result(tracker, PresenceCheckSpec{STATUS_DOWN, -1, "tcp connect failed"});
+        return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_TIMEOUT, -1, "tcp connect timed out"});
+    return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_DOWN, -1, "tcp connect failed"});
 }
 
 PresenceCheckResult run_http_check(const PresenceTracker& tracker)
@@ -459,7 +459,7 @@ PresenceCheckResult run_http_check(const PresenceTracker& tracker)
     HttpTarget http_target;
     std::string error;
     if (!parse_http_url(tracker, http_target, error))
-        return make_result(tracker, PresenceCheckSpec{STATUS_ERROR, -1, error});
+        return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_ERROR, -1, error});
 
     httplib::Client client(http_target.host, http_target.port);
     client.set_connection_timeout(0, tracker.timeout_ms * 1000);
@@ -472,13 +472,13 @@ PresenceCheckResult run_http_check(const PresenceTracker& tracker)
         const bool timed_out = res.error() == httplib::Error::ConnectionTimeout ||
                                res.error() == httplib::Error::Read;
         if (timed_out)
-            return make_result(tracker, PresenceCheckSpec{STATUS_TIMEOUT, -1, "http connect timed out"});
-        return make_result(tracker, PresenceCheckSpec{STATUS_DOWN, -1, "http connect failed"});
+            return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_TIMEOUT, -1, "http connect timed out"});
+        return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_DOWN, -1, "http connect failed"});
     }
     if (res->status >= 100 && res->status < 500)
-        return make_result(tracker, PresenceCheckSpec{STATUS_UP, elapsed_ms(start), ""});
+        return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_UP, elapsed_ms(start), ""});
     return make_result(tracker,
-        PresenceCheckSpec{STATUS_DOWN, elapsed_ms(start),
+        PresenceCheckSpec{PRESENCE_STATUS_DOWN, elapsed_ms(start),
                           "http status " + std::to_string(res->status)});
 }
 } // namespace
@@ -535,5 +535,5 @@ PresenceCheckResult DefaultPresenceCheckRunner::run(const PresenceTracker& track
     if (tracker.check_type == CHECK_TYPE_HTTP)
         return run_http_check(tracker);
 
-    return make_result(tracker, PresenceCheckSpec{STATUS_ERROR, -1, "unsupported check type"});
+    return make_result(tracker, PresenceCheckSpec{PRESENCE_STATUS_ERROR, -1, "unsupported check type"});
 }
