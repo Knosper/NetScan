@@ -1,0 +1,70 @@
+# Build artifacts
+*.a
+*.o
+*.d
+*.obj
+*.so
+*.out
+*.pdb
+
+# Compiled binaries (local dev builds only)
+/netscan
+/netscan.exe
+/netscan-launcher.exe
+/netscan.AppImage
+
+# Release output
+/build/
+/release/
+/data/
+/packaging/windows/Output/
+
+# Runtime files (generated at startup, never committed)
+conf.ini
+conf.ini.tmp
+netscan.db
+netscan.db-wal
+netscan.db-shm
+netscan.log
+netscan.pid
+*.pid
+
+# TLS certificates (generated locally, never committed)
+/certs/
+
+# Frontend build output and dependencies
+resources/web/node_modules/
+resources/web/app.js
+resources/web/style.css
+
+# Temporary / scratch files
+*.bak
+*.tmp
+*.swp
+*.swo
+*.cache
+
+# OS-specific junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Windows build metadata
+*.ncb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# IDE config
+.idea/
+.vscode/
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+
+# Internal dev tools (private repo only)
+.fallow/
+resources/web/.fallow/
+resources/web/.fallowrc.json

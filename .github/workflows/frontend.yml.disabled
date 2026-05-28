@@ -1,0 +1,22 @@
+name: Frontend CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install frontend dependencies
+        working-directory: resources/web
+        run: npm ci
+      - name: Audit frontend dependencies
+        working-directory: resources/web
+        run: npm audit --audit-level=high --omit=dev
+      - name: Build frontend
+        working-directory: resources/web
+        run: npm run build

@@ -1,0 +1,47 @@
+name: CodeQL
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+
+    strategy:
+      matrix:
+        language: [c-cpp, javascript-typescript]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Install dependencies (C++)
+        if: matrix.language == 'c-cpp'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libssl-dev
+
+      - name: Install dependencies (JS)
+        if: matrix.language == 'javascript-typescript'
+        run: cd resources/web && npm ci
+
+      - name: Build (C++)
+        if: matrix.language == 'c-cpp'
+        run: make backend
+
+      - name: Autobuild (JS)
+        if: matrix.language == 'javascript-typescript'
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: ${{ matrix.language }}

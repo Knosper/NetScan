@@ -1,0 +1,12 @@
+host=127.0.0.1
+port=8080
+db_path=./netscan.db
+web_dir=./resources/web
+log_level=info
+# log_file=./netscan.log
+ui_enabled=true
+scan_cooldown_seconds=0
+tls_enabled=false
+# tls_cert_path=./certs/netscan.crt
+# tls_key_path=./certs/netscan.key
+# nmap_path=/usr/bin/nmap
