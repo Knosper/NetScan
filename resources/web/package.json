@@ -13,6 +13,6 @@
     "reactflow": "11.11.4"
   },
   "devDependencies": {
-    "esbuild": "0.25.3"
+    "esbuild": "0.28.1"
   }
 }
