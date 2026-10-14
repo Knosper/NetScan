@@ -125,7 +125,8 @@ static void register_api_routes(httplib::Server& svr, ApiServices& services, Log
     register_health_route(svr, services.health_svc, logger, ui_enabled);
     register_dashboard_routes(svr, services.dashboard_svc, logger);
     register_host_routes(svr, services.host_svc, services.settings_svc, logger);
-    register_notes_routes(svr, services.note_svc, logger);
+    register_notes_routes(svr, services.note_svc, services.scan_svc, services.settings_svc,
+                          logger);
     register_presence_routes(svr, services.presence_svc, logger);
     register_profile_routes(svr, services.profile_svc);
     register_scan_routes(svr, ScanRouteServices{services.scan_svc, services.scan_diff_svc,
@@ -133,7 +134,8 @@ static void register_api_routes(httplib::Server& svr, ApiServices& services, Log
                                                 services.settings_svc, logger});
     register_scheduler_routes(svr, services.scheduler_svc);
     register_settings_routes(svr, services.settings_svc, logger);
-    register_topology_routes(svr, services.topology_svc, logger);
+    register_topology_routes(svr, services.topology_svc, services.scan_svc,
+                             services.settings_svc, logger);
 }
 
 void register_routes(httplib::Server& svr, const AppContext& ctx, const AuthConfig& auth_config,

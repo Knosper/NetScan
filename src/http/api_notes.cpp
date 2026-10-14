@@ -3,6 +3,7 @@
 #include "http/http_status.hpp"
 #include "http/responses.hpp"
 #include "http/route_utils.hpp"
+#include "http/restricted_authz.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -23,10 +24,11 @@ static nlohmann::json note_to_json(const ScanNote& note)
 }
 
 static void handle_notes_list_request(const httplib::Request& req, httplib::Response& res,
-                                      NoteService& service, Logger& logger)
+                                      NoteService& service, ScanService& scan_service,
+                                      SettingsService& settings_service, Logger& logger)
 {
     handle_api_action(res, ApiRequestContext{"GET /api/scans/:id/notes", logger},
-                      [&req, &res, &service]()
+                      [&req, &res, &service, &scan_service, &settings_service]()
                       {
                           int scan_id = 0;
                           if (!try_parse_path_id(req, 1U, scan_id))
@@ -40,6 +42,9 @@ static void handle_notes_list_request(const httplib::Request& req, httplib::Resp
                               set_json_error(res, JsonError{http_status::NOT_FOUND, "not_found", "scan not found"});
                               return;
                           }
+                          if (!allow_restricted_scan_id(req, res, scan_id, scan_service,
+                                                        settings_service))
+                              return;
 
                           std::vector<ScanNote> notes = service.list_notes(scan_id);
                           nlohmann::json body;
@@ -165,13 +170,17 @@ static void handle_note_delete_request(const httplib::Request& req, httplib::Res
                       });
 }
 
-void register_notes_routes(httplib::Server& svr, NoteService& service, Logger& logger)
+void register_notes_routes(httplib::Server& svr, NoteService& service,
+                           ScanService& scan_service, SettingsService& settings_service,
+                           Logger& logger)
 {
     NoteService* svc = &service;
     Logger*      log = &logger;
+    ScanService* scans = &scan_service;
+    SettingsService* settings = &settings_service;
     svr.Get(R"(/api/scans/(\d+)/notes)",
-            [svc, log](const httplib::Request& req, httplib::Response& res)
-            { handle_notes_list_request(req, res, *svc, *log); });
+            [svc, scans, settings, log](const httplib::Request& req, httplib::Response& res)
+            { handle_notes_list_request(req, res, *svc, *scans, *settings, *log); });
     svr.Post(R"(/api/scans/(\d+)/notes)",
              [svc, log](const httplib::Request& req, httplib::Response& res)
              { handle_note_create_request(req, res, *svc, *log); });
