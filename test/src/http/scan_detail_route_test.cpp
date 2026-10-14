@@ -1,6 +1,7 @@
 #include "app/app_context.hpp"
 #include "app/config.hpp"
 #include "db/database.hpp"
+#include "db/allowed_target_repository.hpp"
 #include "db/schema.hpp"
 #include "db/scan_repository.hpp"
 #include "http/routes.hpp"
@@ -17,6 +18,7 @@
 #include "scan_service_test_support.hpp"
 #include "test_output.hpp"
 #include "util/logger.hpp"
+#include "util/secret_utils.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -25,6 +27,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace
@@ -78,6 +81,19 @@ bool expect_api_error_body(const nlohmann::json& body, const std::string& type,
                 "error response should include the expected error message") &&
          ok;
     return ok;
+}
+
+bool expect_restricted_target_denied(const httplib::Result& result,
+                                     const std::string& label)
+{
+    bool ok = expect_response_status(result, 403, label);
+    if (!result)
+        return false;
+    const nlohmann::json expected = {
+        {"status", "error"}, {"type", "forbidden"},
+        {"message", "target not allowed for restricted key"}};
+    return expect(nlohmann::json::parse(result->body, nullptr, false) == expected,
+                  label + " should contain only the forbidden error") && ok;
 }
 
 bool expect_dashboard_response_shape(const nlohmann::json& body)
@@ -154,6 +170,7 @@ int main()
 
         const ScanRequest completed_request = {"127.0.0.1", "443", false, ""};
         const ScanRequest deleted_request = {"127.0.0.2", "22", false, ""};
+        const ScanRequest restricted_request = {"10.0.0.10", "80", false, ""};
 
         const int completed_scan_id = persist_scan(
             db, repo,
@@ -166,6 +183,13 @@ int main()
             {completed_request, PersistedScanState::Completed, false,
              lsm::scan::ScanSnapshot{{{"127.0.0.2", "new-host", {{"tcp", 8443, "open", "https-alt"}}}}}});
         all_ok = expect(diff_scan_id > 0, "diff scan should persist") && all_ok;
+
+        const int restricted_scan_id = persist_scan(
+            db, repo,
+            {restricted_request, PersistedScanState::Completed, false,
+             lsm::scan::ScanSnapshot{{{"10.0.0.10", "restricted-host",
+                                       {{"tcp", 80, "open", "http"}}}}}});
+        all_ok = expect(restricted_scan_id > 0, "restricted-target scan should persist") && all_ok;
 
         const int deleted_scan_id = persist_scan(
             db, repo,
@@ -204,8 +228,21 @@ int main()
         HealthService health_service(db, logger, "127.0.0.1");
         HostService host_service(db);
         NoteService note_service(db, logger);
+        const std::string private_note = "private-test-note";
+        all_ok = expect(note_service.create_note(completed_scan_id, "allowed-test-note").status ==
+                             NoteService::CreateStatus::Created,
+                         "allowed scan note should persist") && all_ok;
+        all_ok = expect(note_service.create_note(restricted_scan_id, private_note).status ==
+                             NoteService::CreateStatus::Created,
+                         "disallowed scan note should persist") && all_ok;
         PresenceService presence_service(db, logger);
         SettingsService settings_service(db, repo_paths.conf_path, logger);
+        AllowedTargetRepository allowed_target_repo(db);
+        const bool seeded_allowed_targets = db.write(
+            [&allowed_target_repo](sqlite3* h)
+            { return allowed_target_repo.replace_all(h, {"127.0.0.0/8"}); });
+        all_ok = expect(seeded_allowed_targets,
+                         "restricted-key target allowlist should persist") && all_ok;
         ProfileService profile_service(db, scan_service);
         ScanDiffService diff_service(db, repo);
         ScanHistoryService history_service(db, repo);
@@ -216,18 +253,110 @@ int main()
                              scan_service, scheduler_service, settings_service, topology_service};
 
         httplib::Server server;
+        const std::string restricted_key = "restricted-test-key";
         const AuthConfig auth_config;
         register_routes(server, ctx, auth_config, services);
         int port = -1;
         port = server.bind_to_any_port("127.0.0.1");
         all_ok = expect(port > 0, "test server should bind to an ephemeral port") && all_ok;
 
-        if (port > 0)
+        httplib::Server restricted_server;
+        AuthConfig restricted_auth_config;
+        restricted_auth_config.admin_api_key_hash = hash_secret_key("admin-test-key");
+        restricted_auth_config.restricted_api_key_hash = hash_secret_key(restricted_key);
+        register_routes(restricted_server, ctx, restricted_auth_config, services);
+        const int restricted_port = restricted_server.bind_to_any_port("127.0.0.1");
+        all_ok = expect(restricted_port > 0,
+                        "restricted-key test server should bind to an ephemeral port") && all_ok;
+
+        if (port > 0 && restricted_port > 0)
         {
             std::thread server_thread([&server]()
                                       { server.listen_after_bind(); });
+            std::thread restricted_server_thread([&restricted_server]()
+                                                 { restricted_server.listen_after_bind(); });
             httplib::Client client("127.0.0.1", port);
             configure_test_client(client);
+            httplib::Client restricted_client("127.0.0.1", restricted_port);
+            configure_test_client(restricted_client);
+            restricted_client.set_default_headers({{"X-NetScan-Restricted-Key", restricted_key}});
+            httplib::Client admin_client("127.0.0.1", restricted_port);
+            configure_test_client(admin_client);
+            admin_client.set_default_headers({{"X-API-Key", "admin-test-key"}});
+
+            const std::string allowed_scan_path =
+                "/api/scans/" + std::to_string(completed_scan_id);
+            const std::string blocked_scan_path =
+                "/api/scans/" + std::to_string(restricted_scan_id);
+            const std::string allowed_diff_path =
+                "/api/scans/" + std::to_string(diff_scan_id) + "/diff";
+            const std::string blocked_diff_path =
+                "/api/scans/" + std::to_string(restricted_scan_id) + "/diff";
+            const std::string allowed_notes_path =
+                "/api/scans/" + std::to_string(completed_scan_id) + "/notes";
+            const std::string blocked_notes_path =
+                "/api/scans/" + std::to_string(restricted_scan_id) + "/notes";
+            const std::string allowed_topology_path =
+                "/api/scans/" + std::to_string(completed_scan_id) + "/topology";
+            const std::string blocked_topology_path =
+                "/api/scans/" + std::to_string(restricted_scan_id) + "/topology";
+
+            for (const auto& route_case : std::vector<std::pair<std::string, std::string>>{
+                     {allowed_scan_path, blocked_scan_path},
+                     {allowed_diff_path, blocked_diff_path},
+                     {allowed_notes_path, blocked_notes_path},
+                     {allowed_topology_path, blocked_topology_path}})
+            {
+                httplib::Result allowed = restricted_client.Get(route_case.first.c_str());
+                all_ok = expect_response_status(
+                             allowed, 200, "restricted key can read allowed scan resource") &&
+                         all_ok;
+                httplib::Result blocked = restricted_client.Get(route_case.second.c_str());
+                all_ok = expect_restricted_target_denied(
+                             blocked, "restricted key cannot read " + route_case.second) &&
+                         all_ok;
+                httplib::Result admin = admin_client.Get(route_case.second.c_str());
+                all_ok = expect_response_status(
+                             admin, 200, "admin can read " + route_case.second) && all_ok;
+                if (admin && route_case.second == blocked_notes_path)
+                    all_ok = expect(admin->body.find(private_note) != std::string::npos,
+                                     "admin notes response should include the private note") &&
+                             all_ok;
+            }
+            {
+                httplib::Result missing = restricted_client.Get("/api/scans/9999");
+                all_ok = expect_response_status(missing, 404,
+                                                "restricted key receives 404 for missing scan") && all_ok;
+                const std::vector<std::string> missing_scan_routes = {
+                    "/api/scans/9999/diff", "/api/scans/9999/topology",
+                    "/api/scans/9999/notes"};
+                for (const std::string& path : missing_scan_routes)
+                {
+                    missing = restricted_client.Get(path.c_str());
+                    all_ok = expect_response_status(
+                                 missing, 404,
+                                 "restricted key receives 404 for missing scan subresource") &&
+                             all_ok;
+                }
+            }
+            {
+                httplib::Result allowed = restricted_client.Get("/api/hosts/127.0.0.1");
+                all_ok = expect_response_status(
+                             allowed, 200, "restricted key can read allowed host detail") &&
+                         all_ok;
+                httplib::Result blocked = restricted_client.Get("/api/hosts/10.0.0.10");
+                all_ok = expect_restricted_target_denied(
+                             blocked, "restricted key cannot read disallowed host detail") &&
+                         all_ok;
+                httplib::Result admin = admin_client.Get("/api/hosts/10.0.0.10");
+                all_ok = expect_response_status(admin, 200,
+                                                "admin can read disallowed host detail") && all_ok;
+                httplib::Result missing = restricted_client.Get("/api/hosts/127.0.0.99");
+                all_ok = expect_response_status(
+                             missing, 404,
+                             "restricted key receives 404 for missing allowed host") &&
+                         all_ok;
+            }
 
             {
                 httplib::Result result = client.Get("/api/dashboard");
@@ -455,7 +584,9 @@ int main()
             }
 
             server.stop();
+            restricted_server.stop();
             server_thread.join();
+            restricted_server_thread.join();
         }
     }
 

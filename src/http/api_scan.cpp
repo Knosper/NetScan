@@ -3,6 +3,7 @@
 #include "http/http_status.hpp"
 #include "http/responses.hpp"
 #include "http/route_utils.hpp"
+#include "http/restricted_authz.hpp"
 #include "http/scan_response_builders.hpp"
 #include "scan/target_validation.hpp"
 #include "scan/scan_types.hpp"
@@ -36,12 +37,6 @@ static bool parse_scan_id_or_400(const httplib::Request& req, httplib::Response&
 static void respond_scan_not_found(httplib::Response& res)
 {
     set_json_error(res, JsonError{http_status::NOT_FOUND, "not_found", "scan not found"});
-}
-
-static void respond_restricted_target_forbidden(httplib::Response& res)
-{
-    set_json_error(res, JsonError{http_status::FORBIDDEN, "forbidden",
-                                  "target not allowed for restricted key"});
 }
 
 static bool validate_port_field(int port_value, const std::string& error_prefix,
@@ -127,31 +122,6 @@ static bool parse_scan_start_request(const httplib::Request& req, httplib::Respo
     return false;
 }
 
-static bool is_restricted_scan_target_allowed(const httplib::Request& req,
-                                              const ScanRequest& request,
-                                              const ScanRouteContext& ctx)
-{
-    if (!req.has_header("X-NetScan-Restricted-Key"))
-        return true;
-
-    const std::vector<std::string> allowed_targets = ctx.settings_service.list_allowed_targets();
-    return is_user_target_allowed(request.target, allowed_targets);
-}
-
-static bool is_restricted_scan_action_allowed(const httplib::Request& req, int scan_id,
-                                              const ScanRouteContext& ctx)
-{
-    if (!req.has_header("X-NetScan-Restricted-Key"))
-        return true;
-
-    std::unique_ptr<PersistedScanSummary> scan = ctx.service.get_scan(scan_id);
-    if (!scan)
-        return true; // 404 handled downstream
-
-    const std::vector<std::string> allowed = ctx.settings_service.list_allowed_targets();
-    return is_user_target_allowed(scan->target, allowed);
-}
-
 static void handle_scan_start_result(httplib::Response& res,
                                      const ScanService::StartAsyncResult& result)
 {
@@ -182,11 +152,8 @@ static void handle_scan_start_request(const httplib::Request& req, httplib::Resp
             ScanRequest request;
             if (!parse_scan_start_request(req, res, request))
                 return;
-            if (!is_restricted_scan_target_allowed(req, request, ctx))
-            {
-                respond_restricted_target_forbidden(res);
+            if (!allow_restricted_target(req, res, request.target, ctx.settings_service))
                 return;
-            }
 
             handle_scan_start_result(res, ctx.service.start_async(request));
         });
@@ -264,20 +231,23 @@ static void handle_scans_list_request(const httplib::Request& req, httplib::Resp
 }
 
 static void handle_scan_detail_request(const httplib::Request& req, httplib::Response& res,
-                                       ScanService& service)
+                                       const ScanRouteContext& ctx)
 {
     int scan_id = 0;
     if (!parse_scan_id_or_400(req, res, scan_id))
         return;
 
-    std::unique_ptr<PersistedScanSummary> scan = service.get_scan(scan_id);
+    std::unique_ptr<PersistedScanSummary> scan = ctx.service.get_scan(scan_id);
     if (!scan)
     {
         respond_scan_not_found(res);
         return;
     }
 
-    const auto hosts = service.get_scan_host_summaries(scan_id);
+    if (!allow_restricted_target(req, res, scan->target, ctx.settings_service))
+        return;
+
+    const auto hosts = ctx.service.get_scan_host_summaries(scan_id);
     set_json_response(res, http_status::OK, scan_summary_with_hosts_to_json(*scan, hosts).dump());
 }
 
@@ -315,11 +285,8 @@ static void handle_scan_delete_request(const httplib::Request& req, httplib::Res
     int scan_id = 0;
     if (!parse_scan_id_or_400(req, res, scan_id))
         return;
-    if (!is_restricted_scan_action_allowed(req, scan_id, ctx))
-    {
-        respond_restricted_target_forbidden(res);
+    if (!allow_restricted_scan_id(req, res, scan_id, ctx.service, ctx.settings_service))
         return;
-    }
 
     ctx.logger.info("UI requested deletion for scan id " + std::to_string(scan_id));
     handle_scan_delete_result(res, scan_id, ctx.service.delete_scan(scan_id));
@@ -362,11 +329,8 @@ static void handle_scan_abort_request(const httplib::Request& req, httplib::Resp
             int scan_id = 0;
             if (!parse_scan_id_or_400(req, res, scan_id))
                 return;
-            if (!is_restricted_scan_action_allowed(req, scan_id, ctx))
-            {
-                respond_restricted_target_forbidden(res);
+            if (!allow_restricted_scan_id(req, res, scan_id, ctx.service, ctx.settings_service))
                 return;
-            }
 
             ctx.logger.info("UI requested abort for scan id " + std::to_string(scan_id));
             handle_scan_abort_result(res, scan_id, ctx.service.terminate_scan(scan_id));
@@ -374,10 +338,13 @@ static void handle_scan_abort_request(const httplib::Request& req, httplib::Resp
 }
 
 static void handle_scan_diff_request(const httplib::Request& req, httplib::Response& res,
-                                     ScanDiffService& service)
+                                     ScanDiffService& service, ScanService& scan_service,
+                                     SettingsService& settings_service)
 {
     int scan_id = 0;
     if (!parse_scan_id_or_400(req, res, scan_id))
+        return;
+    if (!allow_restricted_scan_id(req, res, scan_id, scan_service, settings_service))
         return;
 
     ScanDiffResult result = service.get_scan_diff(scan_id);
@@ -462,14 +429,15 @@ void register_scan_routes(httplib::Server& svr, const ScanRouteServices& service
             [history_svc, settings_svc](const httplib::Request& req, httplib::Response& res)
             { handle_scans_list_request(req, res, *history_svc, *settings_svc); });
     svr.Get(R"(/api/scans/(\d+))",
-            [scan_svc](const httplib::Request& req, httplib::Response& res)
-            { handle_scan_detail_request(req, res, *scan_svc); });
+            [route_ctx](const httplib::Request& req, httplib::Response& res)
+            { handle_scan_detail_request(req, res, route_ctx); });
     svr.Post(R"(/api/scan/(\d+)/abort)",
              [route_ctx](const httplib::Request& req, httplib::Response& res)
              { handle_scan_abort_request(req, res, route_ctx); });
     svr.Get(R"(/api/scans/(\d+)/diff)",
-            [diff_svc](const httplib::Request& req, httplib::Response& res)
-            { handle_scan_diff_request(req, res, *diff_svc); });
+            [diff_svc, scan_svc, settings_svc](const httplib::Request& req,
+                                               httplib::Response& res)
+            { handle_scan_diff_request(req, res, *diff_svc, *scan_svc, *settings_svc); });
     svr.Put("/api/scan-diff/acknowledgements",
             [ack_ctx](const httplib::Request& req, httplib::Response& res)
             { handle_acknowledgement_update(req, res, ack_ctx); });

@@ -3,6 +3,7 @@
 #include "http/http_status.hpp"
 #include "http/responses.hpp"
 #include "http/route_utils.hpp"
+#include "http/restricted_authz.hpp"
 #include "scan/scan_types.hpp"
 #include "scan/target_validation.hpp"
 
@@ -193,11 +194,12 @@ static void handle_hosts_list_request(const httplib::Request& req, httplib::Resp
 }
 
 static void handle_host_detail_request(const httplib::Request& req, httplib::Response& res,
-                                       HostService& service, Logger& logger)
+                                       HostService& service, SettingsService& settings_service,
+                                       Logger& logger)
 {
     handle_api_action(
         res, ApiRequestContext{"GET /api/hosts/:ip", logger},
-        [&req, &res, &service]()
+        [&req, &res, &service, &settings_service]()
         {
             std::string host_ip;
             if (!try_parse_host_ip(req, host_ip))
@@ -206,6 +208,8 @@ static void handle_host_detail_request(const httplib::Request& req, httplib::Res
                     res, JsonError{http_status::BAD_REQUEST, "bad_request", "invalid host ip"});
                 return;
             }
+            if (!allow_restricted_target(req, res, host_ip, settings_service))
+                return;
 
             std::unique_ptr<HostDetail> detail = service.get_host_detail(host_ip);
             if (!detail)
@@ -353,6 +357,7 @@ void register_host_routes(httplib::Server& svr, HostService& service,
     svr.Delete(R"(/api/hosts/([^/]+)/meta/([^/]+))",
                [svc, log](const httplib::Request& req, httplib::Response& res)
                { handle_delete_host_meta_field(req, res, *svc, *log); });
-    svr.Get(R"(/api/hosts/([^/]+))", [svc, log](const httplib::Request& req, httplib::Response& res)
-            { handle_host_detail_request(req, res, *svc, *log); });
+    svr.Get(R"(/api/hosts/([^/]+))",
+            [svc, settings, log](const httplib::Request& req, httplib::Response& res)
+            { handle_host_detail_request(req, res, *svc, *settings, *log); });
 }

@@ -3,6 +3,7 @@
 #include "http/http_status.hpp"
 #include "http/responses.hpp"
 #include "http/route_utils.hpp"
+#include "http/restricted_authz.hpp"
 
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -102,14 +103,17 @@ void handle_topology_error(lsm::service::TopologyError error, httplib::Response&
 }
 
 void handle_topology_request(const httplib::Request& req, httplib::Response& res,
-                             TopologyService& service, Logger& logger)
+                             TopologyService& service, ScanService& scan_service,
+                             SettingsService& settings_service, Logger& logger)
 {
     handle_api_action(
         res, ApiRequestContext{"GET /api/scans/:id/topology", logger},
-        [&req, &res, &service]()
+        [&req, &res, &service, &scan_service, &settings_service]()
         {
             int scan_id = 0;
             if (!try_parse_topology_scan_id(req, res, scan_id))
+                return;
+            if (!allow_restricted_scan_id(req, res, scan_id, scan_service, settings_service))
                 return;
 
             const lsm::service::TopologyResult result = service.get_topology(scan_id);
@@ -121,12 +125,16 @@ void handle_topology_request(const httplib::Request& req, httplib::Response& res
 }
 } // namespace
 
-void register_topology_routes(httplib::Server& svr, TopologyService& service, Logger& logger)
+void register_topology_routes(httplib::Server& svr, TopologyService& service,
+                              ScanService& scan_service, SettingsService& settings_service,
+                              Logger& logger)
 {
     TopologyService* svc = &service;
     Logger*          log = &logger;
+    ScanService*     scans = &scan_service;
+    SettingsService* settings = &settings_service;
 
     svr.Get(R"(/api/scans/(\d+)/topology)",
-            [svc, log](const httplib::Request& req, httplib::Response& res)
-            { handle_topology_request(req, res, *svc, *log); });
+            [svc, scans, settings, log](const httplib::Request& req, httplib::Response& res)
+            { handle_topology_request(req, res, *svc, *scans, *settings, *log); });
 }
