@@ -60,11 +60,6 @@ static bool parse_scan_request(const httplib::Request& req, ScanRequest& out, st
     if (!extract_host_discovery_field(body, out.host_discovery_only, error))
         return false;
 
-    if (out.host_discovery_only && !out.ports.empty())
-    {
-        error = "port specification is not allowed when host discovery only is enabled";
-        return false;
-    }
     return true;
 }
 

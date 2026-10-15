@@ -20,6 +20,7 @@ struct SetupPlan
     SetupTlsMode tls_mode = SetupTlsMode::Disabled;
     std::string tls_cert_path;
     std::string tls_key_path;
+    bool        preserve_existing_config = false;
     bool        generate_admin_key = false;
     bool        generate_user_key = false;
 };
@@ -27,6 +28,7 @@ struct SetupPlan
 struct SetupResult
 {
     bool ok = false;
+    bool tls_enabled = false;
     std::string admin_api_key;
     std::string user_api_key;
     std::string error;
@@ -39,6 +41,7 @@ const char* restricted_secret_name();
 const char* secret_name_for_cli_key(const std::string& key_name);
 bool is_supported_key_name(const std::string& key_name);
 PersistedConfig make_setup_persisted_config();
+PersistedConfig load_setup_persisted_config(const std::string& config_path);
 bool is_readable_regular_file(const std::string& path, std::string& error);
 bool build_and_write_self_signed_cert(const std::string& ip, const std::string& cert_path,
                                       const std::string& key_path, int days, Logger& logger);

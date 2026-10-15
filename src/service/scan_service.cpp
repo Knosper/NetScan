@@ -1,6 +1,5 @@
 #include "service/scan_service.hpp"
-#include "scan/port_spec_validator.hpp"
-#include "scan/target_validation.hpp"
+#include "scan/scan_request_validator.hpp"
 #include "service/settings_service.hpp"
 
 #include "db/sqlite_helpers.hpp"
@@ -341,25 +340,6 @@ int ScanService::get_progress(int scan_id)
     return runtime_.get_progress(scan_id);
 }
 
-ScanService::RequestValidationResult
-ScanService::validate_request(const ScanRequest& request) const
-{
-    if (request.target.empty())
-        return {false, "field 'target' must not be empty", ""};
-
-    if (!is_valid_scan_target(request.target))
-        return {false, "invalid target format", ""};
-
-    if (request.host_discovery_only && !request.ports.empty())
-        return {false, "field 'ports' must be omitted when 'host_discovery_only' is true", ""};
-
-    const PortSpecValidation port_validation = validate_port_spec(request.ports);
-    if (!port_validation.ok)
-        return {false, port_validation.error_message, ""};
-
-    return {true, "", port_validation.validated_spec};
-}
-
 ScanService::StartAsyncResult ScanService::check_cooldown(const std::string& target,
                                                           int cooldown_seconds)
 {
@@ -520,14 +500,11 @@ void ScanService::on_nmap_hosts_found(int scan_id, int count)
 
 ScanService::StartAsyncResult ScanService::start_async(const ScanRequest& request)
 {
-    const RequestValidationResult validation = validate_request(request);
+    const ScanRequestValidation validation = validate_scan_request(request);
     if (!validation.ok)
         return {StartAsyncStatus::ValidationError, -1, validation.error_message};
 
-    ScanRequest normalized_request = request;
-    normalized_request.target = canonicalize_target(request.target);
-    if (!normalized_request.ports.empty())
-        normalized_request.ports = validation.normalized_ports;
+    ScanRequest normalized_request = validation.request;
     normalized_request.nmap_executable = nmap_path_;
 
     {

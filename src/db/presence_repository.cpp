@@ -204,6 +204,22 @@ int PresenceRepository::create_result(sqlite3* h, const PresenceCheckResult& res
     return ok ? db_last_insert_rowid(h) : -1;
 }
 
+std::unique_ptr<PresenceCheckResult> PresenceRepository::get_result(sqlite3* h, int id)
+{
+    const char* sql =
+        "SELECT id, tracker_id, status, latency_ms, error, checked_at "
+        "FROM presence_results WHERE id = ?;";
+    Stmt stmt;
+    stmt.ptr = db_prepare(h, sql);
+    if (!stmt.ptr)
+        return nullptr;
+
+    sqlite3_bind_int(stmt.ptr, 1, id);
+    if (sqlite3_step(stmt.ptr) != SQLITE_ROW)
+        return nullptr;
+    return std::unique_ptr<PresenceCheckResult>(new PresenceCheckResult(read_result_row(stmt.ptr)));
+}
+
 std::vector<PresenceCheckResult> PresenceRepository::list_results(sqlite3* h, int tracker_id,
                                                                     int limit)
 {

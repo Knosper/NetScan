@@ -93,13 +93,6 @@ public:
     void on_nmap_hosts_found(int scan_id, int count);
 
 private:
-    struct RequestValidationResult
-    {
-        bool        ok = false;
-        std::string error_message;
-        std::string normalized_ports;
-    };
-
     struct ScanExecutionResult
     {
         ScanCompletionInput input;
@@ -124,7 +117,6 @@ private:
     ScanRuntime                runtime_;
     static const std::chrono::milliseconds abort_wait_timeout_;
 
-    RequestValidationResult validate_request(const ScanRequest& request) const;
     StartAsyncResult check_cooldown(const std::string& target, int cooldown_seconds);
     StartAsyncResult check_cooldown_policy(const ScanRequest& normalized_request);
     StartAsyncResult check_dependencies() const;

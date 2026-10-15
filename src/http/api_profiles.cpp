@@ -7,14 +7,6 @@
 
 #include <nlohmann/json.hpp>
 
-struct ProfileRequestPayload
-{
-    std::string name;
-    std::string target;
-    std::string ports;
-    bool        host_discovery_only = false;
-};
-
 static bool map_profile_name_error(ProfileWriteError error, httplib::Response& res)
 {
     switch (error)
@@ -58,7 +50,7 @@ static nlohmann::json profile_to_json(const ScanProfile& profile)
     return payload;
 }
 
-static bool parse_profile_request(const httplib::Request& req, ProfileRequestPayload& payload,
+static bool parse_profile_request(const httplib::Request& req, ProfileWriteRequest& payload,
                                   std::string& error)
 {
     nlohmann::json body = nlohmann::json::parse(req.body, nullptr, false);
@@ -86,7 +78,7 @@ static bool parse_profile_request(const httplib::Request& req, ProfileRequestPay
 }
 
 static bool parse_profile_request_or_respond(const httplib::Request& req, httplib::Response& res,
-                                             ProfileRequestPayload& payload)
+                                             ProfileWriteRequest& payload)
 {
     std::string error;
     if (parse_profile_request(req, payload, error))
@@ -112,12 +104,11 @@ static void handle_profile_create(const httplib::Request& req, httplib::Response
     if (reject_if_body_too_large(req, res))
         return;
 
-    ProfileRequestPayload payload;
+    ProfileWriteRequest payload;
     if (!parse_profile_request_or_respond(req, res, payload))
         return;
 
-    ProfileWriteResult created = service.create_profile(payload.name, payload.target, payload.ports,
-                                                        payload.host_discovery_only);
+    ProfileWriteResult created = service.create_profile(payload);
     if (map_profile_name_error(created.error, res))
         return;
     if (!created.profile)
@@ -166,13 +157,11 @@ static void handle_profile_update(const httplib::Request& req, httplib::Response
     if (reject_if_body_too_large(req, res))
         return;
 
-    ProfileRequestPayload payload;
+    ProfileWriteRequest payload;
     if (!parse_profile_request_or_respond(req, res, payload))
         return;
 
-    ProfileWriteResult updated = service.update_profile(profile_id, payload.name, payload.target,
-                                                        payload.ports,
-                                                        payload.host_discovery_only);
+    ProfileWriteResult updated = service.update_profile(profile_id, payload);
     if (map_profile_name_error(updated.error, res))
         return;
     if (!updated.profile)

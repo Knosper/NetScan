@@ -1,7 +1,6 @@
 #include "service/scheduler_service.hpp"
-#include "scan/port_spec_validator.hpp"
+#include "scan/scan_request_validator.hpp"
 #include "scan/scan_types.hpp"
-#include "scan/target_validation.hpp"
 #include "util/time_utils.hpp"
 
 #include <algorithm>
@@ -93,13 +92,14 @@ std::unique_ptr<ScheduledJob> SchedulerService::get_job(int id)
 
 int SchedulerService::create_job(const ScheduledJob& job)
 {
-    if (!is_valid_scan_target(job.target))
+    const ScanRequestValidation validation = validate_scan_request(build_scan_request(job));
+    if (!validation.ok)
         return 0;
 
-    if (!validate_port_spec(job.ports).ok)
-        return 0;
-
-    return db_.write([this, &job](sqlite3* h) { return repo_.create_job(h, job); });
+    ScheduledJob normalized = job;
+    normalized.target = validation.request.target;
+    normalized.ports = validation.request.ports;
+    return db_.write([this, &normalized](sqlite3* h) { return repo_.create_job(h, normalized); });
 }
 
 bool SchedulerService::delete_job(int id)
@@ -161,10 +161,12 @@ bool SchedulerService::validate_due_job(const ScheduledJob& job,
         return false;
     if (should_skip_due_to_backoff(job.id, now))
         return false;
-    if (is_valid_scan_target(job.target))
+    const ScanRequestValidation validation = validate_scan_request(build_scan_request(job));
+    if (validation.ok)
         return true;
 
-    logger_.warn("Scheduler: invalid target in job " + std::to_string(job.id) + ", skipping");
+    logger_.warn("Scheduler: invalid scan request in job " + std::to_string(job.id) +
+                 ": " + validation.error_message + ", skipping");
     return false;
 }
 

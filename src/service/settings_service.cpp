@@ -4,10 +4,26 @@
 #include "util/string_utils.hpp"
 
 #include <cstdio>
+#include <exception>
 #include <set>
 
 namespace
 {
+bool load_config_for_setup(const std::string& config_path, PersistedConfig& pending,
+                           std::string& error)
+{
+    try
+    {
+        pending = load_persisted_config(config_path);
+        return true;
+    }
+    catch (const std::exception& ex)
+    {
+        error = std::string("failed to read config for setup: ") + ex.what();
+        return false;
+    }
+}
+
 std::string make_allowed_target_field_name(std::size_t index)
 {
     return "field 'user_allowed_targets[" + std::to_string(index) + "]'";
@@ -152,7 +168,12 @@ bool SettingsService::request_setup(int setup_port, std::string& error)
         return false;
     }
 
-    PersistedConfig pending = make_default_persisted_config();
+    PersistedConfig pending;
+    if (!load_config_for_setup(config_path_, pending, error))
+    {
+        logger_.error(error);
+        return false;
+    }
     pending.port = setup_port;
     pending.setup_pending = true;
 

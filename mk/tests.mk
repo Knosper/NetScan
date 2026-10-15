@@ -1,3 +1,6 @@
+SCAN_VALIDATION_SRC = src/scan/port_spec_validator.cpp \
+					  src/scan/scan_request_validator.cpp
+
 TEST_BIN_DIR = build/test/bin
 TEST_SUPPORT_SRC = test/src/service/scan_service_test_support.cpp
 TEST_SUPPORT_OBJ = $(patsubst test/src/%.cpp,build/test/src/%.o,$(TEST_SUPPORT_SRC))
@@ -14,7 +17,7 @@ TEST_SRC = test/src/scan/nmap_command_builder_test.cpp \
 		   src/scan/nmap_command_builder.cpp \
 		   src/scan/scan_chunk_planner.cpp \
 		   src/scan/target_validation.cpp \
-		   src/scan/port_spec_validator.cpp \
+		   $(SCAN_VALIDATION_SRC) \
 		   src/util/string_utils.cpp
 
 TEST_OBJ = $(patsubst test/src/%.cpp,build/test/src/%.o,$(patsubst src/%.cpp,build/%.o,$(TEST_SRC)))
@@ -58,7 +61,7 @@ SCAN_DIFF_MODEL_TEST_SRC = test/src/service/scan_diff_model_test.cpp \
 						   src/db/database.cpp \
 						   src/db/schema.cpp \
 						   $(SCAN_REPOSITORY_SRC) \
-						   src/scan/port_spec_validator.cpp \
+						   $(SCAN_VALIDATION_SRC) \
 						   src/scan/target_validation.cpp \
 						   src/util/file_permissions.cpp \
 						   src/util/logger.cpp \
@@ -96,7 +99,7 @@ SCAN_ABORT_SERVICE_TEST_SRC = test/src/service/scan_abort_service_test.cpp \
 							  src/scan/nmap_runner_internal.cpp \
 							  src/scan/nmap_runner_common.cpp \
 							  $(NMAP_RUNNER_PLATFORM_SRC) \
-							  src/scan/port_spec_validator.cpp \
+							  $(SCAN_VALIDATION_SRC) \
 							  src/scan/process_renderer.cpp \
 							  src/scan/scan_orchestrator.cpp \
 							  src/scan/target_validation.cpp \
@@ -108,6 +111,16 @@ SCAN_ABORT_SERVICE_TEST_OBJ = $(patsubst test/src/%.cpp,build/test/src/%.o,$(pat
 SCAN_ABORT_SERVICE_TEST_DEP = $(SCAN_ABORT_SERVICE_TEST_OBJ:.o=.d)
 SCAN_ABORT_SERVICE_TEST_TARGET = $(TEST_BIN_DIR)/scan_abort_service_test
 
+PROFILE_SERVICE_TEST_SRC = test/src/service/profile_service_test.cpp \
+                          src/service/profile_service.cpp \
+                          src/db/profile_repository.cpp \
+                          src/service/scheduler_service.cpp \
+                          src/db/schedule_repository.cpp \
+                          $(filter-out test/src/service/scan_abort_service_test.cpp,$(SCAN_ABORT_SERVICE_TEST_SRC))
+PROFILE_SERVICE_TEST_OBJ = $(patsubst test/src/%.cpp,build/test/src/%.o,$(patsubst src/%.cpp,build/%.o,$(PROFILE_SERVICE_TEST_SRC)))
+PROFILE_SERVICE_TEST_DEP = $(PROFILE_SERVICE_TEST_OBJ:.o=.d)
+PROFILE_SERVICE_TEST_TARGET = $(TEST_BIN_DIR)/profile_service_test
+
 SCAN_COMPLETION_TEST_SRC = test/src/service/scan_completion_test.cpp \
 						   src/service/scan_completion.cpp \
 						   src/service/scan_result_builders.cpp \
@@ -118,7 +131,7 @@ SCAN_COMPLETION_TEST_SRC = test/src/service/scan_completion_test.cpp \
 						   src/db/schema.cpp \
 						   $(SCAN_REPOSITORY_SRC) \
 						   src/scan/nmap_xml_parser.cpp \
-						   src/scan/port_spec_validator.cpp \
+						   $(SCAN_VALIDATION_SRC) \
 						   src/scan/scan_snapshot_merger.cpp \
 						   src/scan/target_validation.cpp \
 						   src/util/file_permissions.cpp \
@@ -137,7 +150,7 @@ HOST_SERVICE_DETAIL_TEST_SRC = test/src/service/host_service_detail_test.cpp \
 							   src/db/host_repository.cpp \
 							   src/db/host_meta_repository.cpp \
 							   $(SCAN_REPOSITORY_SRC) \
-							   src/scan/port_spec_validator.cpp \
+							   $(SCAN_VALIDATION_SRC) \
 							   src/scan/target_validation.cpp \
 							   src/util/file_permissions.cpp \
 							   src/util/logger.cpp \
@@ -170,7 +183,7 @@ TOPOLOGY_SERVICE_TEST_SRC = test/src/service/topology_service_test.cpp \
 							   src/db/schema.cpp \
 							   $(SCAN_REPOSITORY_SRC) \
 							   src/db/host_meta_repository.cpp \
-							   src/scan/port_spec_validator.cpp \
+							   $(SCAN_VALIDATION_SRC) \
 							   src/scan/target_validation.cpp \
 							   src/util/file_permissions.cpp \
 							   src/util/logger.cpp \
@@ -186,7 +199,7 @@ SCHEDULER_SERVICE_TEST_SRC = test/src/service/scheduler_service_test.cpp \
 							 src/db/schema.cpp \
 							 src/db/schedule_repository.cpp \
 							 src/scan/target_validation.cpp \
-							 src/scan/port_spec_validator.cpp \
+							 $(SCAN_VALIDATION_SRC) \
 							 src/util/file_permissions.cpp \
 							 src/util/logger.cpp \
 							 src/util/path_utils.cpp \
@@ -255,7 +268,7 @@ SCAN_DETAIL_ROUTE_TEST_SRC = test/src/http/scan_detail_route_test.cpp \
 							 src/scan/nmap_runner_internal.cpp \
 							 src/scan/nmap_runner_common.cpp \
 							  $(NMAP_RUNNER_PLATFORM_SRC) \
-							 src/scan/port_spec_validator.cpp \
+							 $(SCAN_VALIDATION_SRC) \
 							 src/scan/process_renderer.cpp \
 							 src/scan/scan_orchestrator.cpp \
 						  src/scan/target_validation.cpp \
@@ -325,7 +338,7 @@ SCAN_START_ROUTE_TEST_SRC = test/src/http/scan_start_route_test.cpp \
 							src/scan/nmap_runner_internal.cpp \
 							src/scan/nmap_runner_common.cpp \
 							  $(NMAP_RUNNER_PLATFORM_SRC) \
-							src/scan/port_spec_validator.cpp \
+							$(SCAN_VALIDATION_SRC) \
 							src/scan/process_renderer.cpp \
 							src/scan/scan_orchestrator.cpp \
 							src/scan/target_validation.cpp \
@@ -395,7 +408,7 @@ SCAN_ABORT_ROUTE_TEST_SRC = test/src/http/scan_abort_route_test.cpp \
 							src/scan/nmap_runner_internal.cpp \
 							src/scan/nmap_runner_common.cpp \
 							  $(NMAP_RUNNER_PLATFORM_SRC) \
-							src/scan/port_spec_validator.cpp \
+							$(SCAN_VALIDATION_SRC) \
 							src/scan/process_renderer.cpp \
 							src/scan/scan_orchestrator.cpp \
 							src/scan/target_validation.cpp \
@@ -466,7 +479,7 @@ SETTINGS_ROUTE_TEST_SRC = test/src/http/settings_route_test.cpp \
 						  src/scan/nmap_runner_internal.cpp \
 						  src/scan/nmap_runner_common.cpp \
 							  $(NMAP_RUNNER_PLATFORM_SRC) \
-						  src/scan/port_spec_validator.cpp \
+						  $(SCAN_VALIDATION_SRC) \
 						  src/scan/process_renderer.cpp \
 						  src/scan/scan_orchestrator.cpp \
 						  src/scan/target_validation.cpp \
@@ -486,7 +499,7 @@ SCAN_REPOSITORY_TEST_SRC = test/src/db/scan_repository_test.cpp \
 						   src/db/schema.cpp \
 						   $(SCAN_REPOSITORY_SRC) \
 						   src/scan/nmap_xml_parser.cpp \
-						   src/scan/port_spec_validator.cpp \
+						   $(SCAN_VALIDATION_SRC) \
 						   src/scan/target_validation.cpp \
 						   src/util/file_permissions.cpp \
 						   src/util/logger.cpp \
@@ -578,7 +591,7 @@ LOGGER_INTEGRATION_TEST_SRC = test/src/util/logger_integration_test.cpp \
 			  src/scan/nmap_runner_internal.cpp \
 			  src/scan/nmap_runner_common.cpp \
 							  $(NMAP_RUNNER_PLATFORM_SRC) \
-			  src/scan/port_spec_validator.cpp \
+			  $(SCAN_VALIDATION_SRC) \
 			  src/scan/process_renderer.cpp \
 			  src/scan/scan_orchestrator.cpp \
 			  src/scan/target_validation.cpp \
@@ -663,7 +676,7 @@ FAST_TEST_TARGETS = $(TEST_TARGET) $(RENDERER_TEST_TARGET) \
 					$(SECRET_UTILS_TEST_TARGET) \
 					$(CONFIG_TEST_TARGET)
 
-INTEGRATION_TEST_TARGETS = $(RUNNER_TEST_TARGET) \
+INTEGRATION_TEST_TARGETS = $(RUNNER_TEST_TARGET) $(PROFILE_SERVICE_TEST_TARGET) \
 						   $(SCAN_DIFF_MODEL_TEST_TARGET) \
 						   $(SCAN_ABORT_SERVICE_TEST_TARGET) $(SCAN_COMPLETION_TEST_TARGET) \
 						   $(HOST_SERVICE_DETAIL_TEST_TARGET) \
@@ -689,7 +702,7 @@ FAST_TEST_DEPS = $(TEST_DEP) $(RENDERER_TEST_DEP) \
 				 $(SECRET_UTILS_TEST_DEP) \
 				 $(CONFIG_TEST_DEP)
 
-INTEGRATION_TEST_DEPS = $(RUNNER_TEST_DEP) \
+INTEGRATION_TEST_DEPS = $(PROFILE_SERVICE_TEST_DEP) $(RUNNER_TEST_DEP) \
 						$(SCAN_DIFF_MODEL_TEST_DEP) \
 						$(SCAN_ABORT_SERVICE_TEST_DEP) $(SCAN_COMPLETION_TEST_DEP) \
 						$(HOST_SERVICE_DETAIL_TEST_DEP) \
@@ -714,6 +727,7 @@ $(NMAP_CHECK_TEST_TARGET): $(NMAP_CHECK_TEST_OBJ)
 $(SCAN_CHUNK_RUNNER_TEST_TARGET): $(SCAN_CHUNK_RUNNER_TEST_OBJ)
 $(XML_PARSER_TEST_TARGET): $(XML_PARSER_TEST_OBJ) $(TINYXML2_OBJ)
 $(SCAN_DIFF_MODEL_TEST_TARGET): $(SCAN_DIFF_MODEL_TEST_OBJ) $(TEST_SUPPORT_OBJ) $(SQLITE_OBJ) $(TINYXML2_OBJ)
+$(PROFILE_SERVICE_TEST_TARGET): $(PROFILE_SERVICE_TEST_OBJ) $(TEST_SUPPORT_OBJ) $(SQLITE_OBJ) $(TINYXML2_OBJ)
 $(SCAN_ABORT_SERVICE_TEST_TARGET): $(SCAN_ABORT_SERVICE_TEST_OBJ) $(TEST_SUPPORT_OBJ) $(SQLITE_OBJ) $(TINYXML2_OBJ)
 $(SCAN_COMPLETION_TEST_TARGET): $(SCAN_COMPLETION_TEST_OBJ) $(TEST_SUPPORT_OBJ) $(SQLITE_OBJ) $(TINYXML2_OBJ)
 $(HOST_SERVICE_DETAIL_TEST_TARGET): $(HOST_SERVICE_DETAIL_TEST_OBJ) $(TEST_SUPPORT_OBJ) $(SQLITE_OBJ)

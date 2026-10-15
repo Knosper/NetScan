@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { BrandMark } from "../atoms.jsx";
 import { fetchWithTimeout } from "../api.js";
+import { getApiKey } from "../apiKey.js";
 
 function Field({ label, children }) {
     return (
@@ -166,60 +167,59 @@ function KeyDisplay({ label, value }) {
     );
 }
 
+function setupTargetUrl(result) {
+    const url = new URL("/", window.location.href);
+    const host = result.host;
+    if (host && !["0.0.0.0", "::", "[::]"].includes(host)) {
+        url.hostname = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+    }
+    if (["http:", "https:"].includes(result.protocol)) url.protocol = result.protocol;
+    url.port = String(result.port);
+    return url;
+}
+
+function setupHealthHeaders(result) {
+    if (result.adminKey) return { "X-API-Key": result.adminKey };
+    if (result.userKey) return { "X-NetScan-Restricted-Key": result.userKey };
+    const storedKey = getApiKey();
+    return storedKey ? { "X-API-Key": storedKey } : {};
+}
+
 function SetupDone({ result }) {
     const hasKeys = result.adminKey || result.userKey;
-    const [serverState, setServerState] = useState("waiting");
-    const startRef = useRef(Date.now());
-    const timeoutRef = useRef(null);
-    const cancelledRef = useRef(false);
+    const targetUrl = setupTargetUrl(result);
+    const needsNavigation = targetUrl.origin !== window.location.origin;
+    const [serverState, setServerState] = useState(needsNavigation ? "navigate" : "waiting");
 
     useEffect(() => {
-        cancelledRef.current = false;
+        if (needsNavigation) return;
+        let cancelled = false;
+        let timeoutId;
+        const startedAt = Date.now();
 
-        function poll() {
-            if (cancelledRef.current) return;
-            const elapsed = Date.now() - startRef.current;
-            if (elapsed >= 30000) {
-                setServerState("timeout");
-                return;
+        async function poll() {
+            if (cancelled) return;
+            if (Date.now() - startedAt >= 30000) { setServerState("timeout"); return; }
+            try {
+                const response = await fetchWithTimeout(new URL("/api/health", targetUrl).href,
+                    { headers: setupHealthHeaders(result) }, 2000);
+                if (cancelled) return;
+                if ([401, 403, 429].includes(response.status)) { setServerState("auth"); return; }
+                const data = response.ok ? await response.json() : null;
+                if (cancelled) return;
+                if (data?.mode === "normal") { setServerState("ready"); return; }
+            } catch (_) {
+                if (cancelled) return;
             }
-            fetchWithTimeout("/api/health", {}, 2000)
-                .then(res => res.ok ? res.json() : null)
-                .then(data => {
-                    if (cancelledRef.current) return;
-                    if (data && data.mode === "normal") {
-                        setServerState("ready");
-                        return;
-                    }
-                    timeoutRef.current = setTimeout(poll, 500);
-                })
-                .catch(() => {
-                    if (cancelledRef.current) return;
-                    timeoutRef.current = setTimeout(poll, 500);
-                });
+            timeoutId = setTimeout(poll, 500);
         }
 
         poll();
-
-        return () => {
-            cancelledRef.current = true;
-            if (timeoutRef.current) clearTimeout(timeoutRef.current);
-        };
-    }, []);
+        return () => { cancelled = true; clearTimeout(timeoutId); };
+    }, [result, needsNavigation]);
 
     function open() {
-        const targetHost = result.host;
-        const targetPort = String(result.port);
-        const currentHost = window.location.hostname;
-        const currentPort = window.location.port;
-        const sameHost = targetHost === currentHost;
-        const samePort = targetPort === currentPort;
-        if (sameHost && samePort) {
-            window.location.replace("/");
-            return;
-        }
-        const url = `${window.location.protocol}//${targetHost}:${targetPort}/`;
-        window.location.assign(url);
+        window.location.assign(targetUrl.href);
     }
 
     const buttonDisabled = serverState === "waiting";
@@ -238,6 +238,18 @@ function SetupDone({ result }) {
                     </div>
                     {result.adminKey && <KeyDisplay label="Admin API key" value={result.adminKey} />}
                     {result.userKey && <KeyDisplay label="User API key" value={result.userKey} />}
+                </div>
+            )}
+            {serverState === "navigate" && (
+                <div className="setup-warning">
+                    The server address changed. Open {targetUrl.origin} to check readiness.
+                    {hasKeys && " Save your keys before leaving and enter one on the new page."}
+                </div>
+            )}
+            {serverState === "auth" && (
+                <div className="setup-warning">
+                    Readiness could not be verified because authentication was rejected or rate limited.
+                    Save your keys, then open NetScan and sign in.
                 </div>
             )}
             {serverState === "timeout" && (

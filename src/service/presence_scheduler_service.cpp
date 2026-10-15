@@ -1,5 +1,7 @@
 #include "service/presence_scheduler_service.hpp"
 
+#include <exception>
+
 namespace
 {
 const int MAX_CONCURRENT_CHECKS = 4;
@@ -122,22 +124,45 @@ void PresenceSchedulerService::dispatch_check(const PresenceTracker& tracker)
     const int check_worker_id = next_check_worker_id_++;
     std::thread check_worker([this, tracker, check_worker_id]()
     {
-        PresenceRunResult result = presence_service_.run_check(tracker);
-        if (result.status != PresenceStatus::Ok)
-        {
-            logger_.warn("Presence scheduler: check failed for tracker " +
-                         std::to_string(tracker.id) + ": " + result.message);
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            running_trackers_.erase(tracker.id);
-            completed_check_workers_.push_back(check_worker_id);
-            --active_checks_;
-        }
-        cv_.notify_all();
+        run_check_safely(tracker);
+        finish_check(tracker.id, check_worker_id);
     });
     check_workers_.insert(std::make_pair(check_worker_id, std::move(check_worker)));
+}
+
+void PresenceSchedulerService::log_check_failure(int tracker_id, const std::string& message)
+{
+    logger_.warn("Presence scheduler: check failed for tracker " +
+                 std::to_string(tracker_id) + ": " + message);
+}
+
+void PresenceSchedulerService::run_check_safely(const PresenceTracker& tracker)
+{
+    try
+    {
+        const PresenceRunResult result = presence_service_.run_check(tracker);
+        if (result.status != PresenceStatus::Ok)
+            log_check_failure(tracker.id, result.message);
+    }
+    catch (const std::exception& error)
+    {
+        log_check_failure(tracker.id, error.what());
+    }
+    catch (...)
+    {
+        log_check_failure(tracker.id, "unknown exception");
+    }
+}
+
+void PresenceSchedulerService::finish_check(int tracker_id, int worker_id)
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_trackers_.erase(tracker_id);
+        completed_check_workers_.push_back(worker_id);
+        --active_checks_;
+    }
+    cv_.notify_all();
 }
 
 void PresenceSchedulerService::reap_completed_checks()

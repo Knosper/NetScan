@@ -250,6 +250,18 @@ PersistedConfig make_setup_persisted_config()
     persisted.ui_enabled = true;
     return persisted;
 }
+PersistedConfig load_setup_persisted_config(const std::string& config_path)
+{
+    const bool config_exists = path_exists(config_path);
+    PersistedConfig persisted = config_exists
+        ? load_persisted_config(config_path) : make_setup_persisted_config();
+    if (!config_exists)
+        persisted.web_dir = join_path(get_executable_dir(), "resources/web");
+    persisted.ui_enabled = true;
+    persisted.setup_pending = false;
+    return persisted;
+}
+
 const char* secret_name_for_cli_key(const std::string& key_name)
 {
     if (key_name == "admin")
@@ -410,7 +422,8 @@ SetupResult apply_setup_plan(const SetupPlan& plan, const std::string& config_pa
         return result;
     }
 
-    PersistedConfig persisted = make_setup_persisted_config();
+    PersistedConfig persisted = plan.preserve_existing_config
+        ? load_setup_persisted_config(absolute_config_path) : make_setup_persisted_config();
     persisted.host = plan.host;
     persisted.port = plan.port;
 
@@ -427,6 +440,7 @@ SetupResult apply_setup_plan(const SetupPlan& plan, const std::string& config_pa
     if (!write_persisted_config_atomically(absolute_config_path, persisted, result.error))
         return result;
 
+    result.tls_enabled = runtime_config.tls_enabled;
     result.ok = true;
     return result;
 }

@@ -246,10 +246,9 @@ PresenceRunResult PresenceService::run_check(const PresenceTracker& tracker)
     PresenceCheckResult result = runner_.run(tracker);
     result.tracker_id = tracker.id;
     PresenceCheckResult saved = persist_result(result);
-    prune_results();
-
     if (saved.id <= 0)
         return PresenceRunResult{PresenceStatus::InternalError, "failed to save result", saved};
+    prune_results();
     maybe_start_initial_scan(tracker, saved);
     return PresenceRunResult{PresenceStatus::Ok, "", saved};
 }
@@ -343,22 +342,22 @@ void PresenceService::maybe_start_initial_scan(const PresenceTracker& tracker,
 
 PresenceCheckResult PresenceService::persist_result(const PresenceCheckResult& result)
 {
-    const int id = db_.write([this, &result](sqlite3* h) {
-        return repo_.create_result(h, result);
-    });
-    if (id <= 0)
-    {
-        logger_.error("presence_service: failed to persist check result for tracker id " +
-                      std::to_string(result.tracker_id));
-        return PresenceCheckResult();
-    }
+    return db_.write([this, &result](sqlite3* h) {
+        const int id = repo_.create_result(h, result);
+        if (id <= 0)
+        {
+            logger_.error("presence_service: failed to persist check result for tracker id " +
+                          std::to_string(result.tracker_id));
+            return PresenceCheckResult();
+        }
 
-    std::vector<PresenceCheckResult> results = list_results(result.tracker_id, 1);
-    if (results.empty())
-    {
-        logger_.error("presence_service: persisted check result missing after insert for "
-                      "tracker id " + std::to_string(result.tracker_id));
-        return PresenceCheckResult();
-    }
-    return results.front();
+        const auto saved = repo_.get_result(h, id);
+        if (!saved)
+        {
+            logger_.error("presence_service: persisted check result missing after insert for "
+                          "tracker id " + std::to_string(result.tracker_id));
+            return PresenceCheckResult();
+        }
+        return *saved;
+    });
 }

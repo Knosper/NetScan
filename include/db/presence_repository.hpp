@@ -51,6 +51,7 @@ public:
     int count_trackers(sqlite3* h);
 
     int create_result(sqlite3* h, const PresenceCheckResult& result);
+    std::unique_ptr<PresenceCheckResult> get_result(sqlite3* h, int id);
     std::vector<PresenceCheckResult> list_results(sqlite3* h, int tracker_id, int limit);
     int prune_results_older_than(sqlite3* h, const std::string& cutoff);
     int prune_results_exceeding_total(sqlite3* h, int keep_count);

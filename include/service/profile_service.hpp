@@ -36,14 +36,8 @@ public:
 
     std::vector<ScanProfile> list_profiles();
 
-    ProfileWriteResult create_profile(const std::string& name,
-                                      const std::string& target,
-                                      const std::string& ports,
-                                      bool               host_discovery_only);
-    ProfileWriteResult update_profile(int id, const std::string& name,
-                                      const std::string& target,
-                                      const std::string& ports,
-                                      bool               host_discovery_only);
+    ProfileWriteResult create_profile(const ProfileWriteRequest& request);
+    ProfileWriteResult update_profile(int id, const ProfileWriteRequest& request);
 
     bool delete_profile(int id);
 

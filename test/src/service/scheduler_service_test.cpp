@@ -112,7 +112,7 @@ int insert_due_job(Database& db, const std::string& next_run_at)
     ScheduleRepository repo(db);
     ScheduledJob job;
     job.target           = "192.168.1.1";
-    job.ports            = "1-1024";
+    job.ports            = "1-128";
     job.interval_seconds = 3600;
     job.enabled          = true;
     job.next_run_at      = next_run_at;
@@ -144,6 +144,24 @@ bool test_due_job_is_dispatched()
 
     return expect(updated && updated->next_run_at != past,
                   "due job: next_run_at must be updated after dispatch");
+}
+
+bool test_invalid_stored_job_is_not_dispatched()
+{
+    ScopedSchedulerFixture fixture;
+    fixture.scan_starter_.next_status = IScanStarter::StartAsyncStatus::Accepted;
+    fixture.db_.write([&fixture](sqlite3* h) {
+        ScheduleRepository repo(fixture.db_);
+        ScheduledJob job;
+        job.target = "127.0.0.1";
+        job.ports = "1-129";
+        job.interval_seconds = 60;
+        return repo.create_job(h, job);
+    });
+    SchedulerService service(fixture.db_, fixture.scan_starter_, fixture.logger_);
+    service.tick_once_for_test();
+    return expect(fixture.scan_starter_.start_calls.load() == 0,
+                  "invalid stored job must fail shared validation before dispatch");
 }
 
 bool test_future_job_is_not_dispatched()
@@ -185,7 +203,7 @@ bool test_second_tick_does_not_redispatch_after_successful_dispatch()
 
 int main()
 {
-    bool all_ok = true;
+    bool all_ok = test_invalid_stored_job_is_not_dispatched();
 
     {
         ScopedSchedulerFixture fixture;

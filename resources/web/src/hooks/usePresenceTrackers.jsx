@@ -110,7 +110,7 @@ function usePresenceActions(state, app)
         setUpdatingTrackerIds(previous => ({ ...previous, [id]: true }));
         try {
             const response = await fetchWithTimeout(`${PRESENCE_API}/${id}`, {
-                method: "PUT",
+                method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(trackerRequestBody({ ...tracker, enabled }))
             });

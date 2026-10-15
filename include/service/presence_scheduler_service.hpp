@@ -39,6 +39,9 @@ private:
     void run();
     void tick();
     void dispatch_check(const PresenceTracker& tracker);
+    void run_check_safely(const PresenceTracker& tracker);
+    void log_check_failure(int tracker_id, const std::string& message);
+    void finish_check(int tracker_id, int worker_id);
     void reap_completed_checks();
     bool should_dispatch_locked(const PresenceTracker& tracker,
                                 std::chrono::steady_clock::time_point now);

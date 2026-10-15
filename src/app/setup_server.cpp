@@ -64,6 +64,7 @@ static nlohmann::json run_setup_apply(const SetupRequest& req, const std::string
     SetupPlan plan;
     plan.host = req.host;
     plan.port = req.port;
+    plan.preserve_existing_config = true;
     plan.generate_admin_key = req.generate_admin_key;
     plan.generate_user_key = req.generate_user_key;
 
@@ -77,6 +78,7 @@ static nlohmann::json run_setup_apply(const SetupRequest& req, const std::string
 
     nlohmann::json result;
     result["status"] = "ok";
+    result["protocol"] = setup_result.tls_enabled ? "https:" : "http:";
     if (!setup_result.admin_api_key.empty())
         result["adminKey"] = setup_result.admin_api_key;
     if (!setup_result.user_api_key.empty())
@@ -146,7 +148,7 @@ static void register_setup_reset_route(httplib::Server& svr, const std::string& 
              });
 }
 
-// web_dir is resolved relative to the executable so it works regardless of CWD.
+// web_dir is already resolved relative to the configuration file or executable.
 static void register_setup_static_routes(httplib::Server& svr, const std::string& web_dir)
 {
     svr.Get("/app.js",
@@ -212,7 +214,8 @@ int ApplicationBootstrap::run_setup_server(const std::string& config_path, Logge
     httplib::Server svr;
     const std::string absolute_config_path = to_absolute_path(config_path);
     const SetupBind bind = resolve_setup_bind(absolute_config_path);
-    const std::string web_dir = join_path(get_executable_dir(), "resources/web");
+    const PersistedConfig persisted = load_setup_persisted_config(absolute_config_path);
+    const std::string web_dir = resolve_runtime_config(persisted, absolute_config_path).web_dir;
 
     register_setup_info_routes(svr, bind);
     register_setup_submit_route(svr, config_path, logger);

@@ -122,6 +122,7 @@ SRC =	src/main.cpp \
 		src/scan/scan_chunk_runner.cpp \
 		src/scan/scan_snapshot_merger.cpp \
 		src/scan/port_spec_validator.cpp \
+		src/scan/scan_request_validator.cpp \
 		src/scan/process_renderer.cpp \
 		src/scan/nmap_runner_internal.cpp \
 		src/scan/nmap_runner_common.cpp \

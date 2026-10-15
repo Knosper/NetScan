@@ -2,9 +2,7 @@
 #include "http/http_status.hpp"
 #include "http/responses.hpp"
 #include "http/route_utils.hpp"
-#include "scan/port_spec_validator.hpp"
-#include "scan/target_validation.hpp"
-#include "util/string_utils.hpp"
+#include "scan/scan_request_validator.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -26,26 +24,6 @@ static nlohmann::json scheduled_job_to_json(const ScheduledJob& job)
     return payload;
 }
 
-static bool parse_job_target(const nlohmann::json& body, ScheduledJob& out, std::string& error)
-{
-    nlohmann::json::const_iterator target_it = body.find("target");
-    if (target_it == body.end() || !target_it->is_string() ||
-        target_it->get<std::string>().empty())
-    {
-        error = "field 'target' must be a non-empty string";
-        return false;
-    }
-
-    out.target = util::trim(target_it->get<std::string>());
-    if (!is_valid_scan_target(out.target))
-    {
-        error = "field 'target' contains invalid characters or is not a valid scan target";
-        return false;
-    }
-
-    return true;
-}
-
 static bool parse_job_interval(const nlohmann::json& body, ScheduledJob& out, std::string& error)
 {
     nlohmann::json::const_iterator interval_it = body.find("interval_seconds");
@@ -60,18 +38,17 @@ static bool parse_job_interval(const nlohmann::json& body, ScheduledJob& out, st
     return true;
 }
 
-static bool validate_job_ports(ScheduledJob& out, std::string& error)
+static bool validate_job_request(ScheduledJob& job, std::string& error)
 {
-    if (out.ports.empty())
-        return true;
-
-    const PortSpecValidation port_validation = validate_port_spec(out.ports);
-    if (!port_validation.ok)
+    const ScanRequestValidation validation = validate_scan_request(
+        {job.target, job.ports, job.host_discovery_only, ""});
+    if (!validation.ok)
     {
-        error = "field 'ports': " + port_validation.error_message;
+        error = validation.error_message;
         return false;
     }
-
+    job.target = validation.request.target;
+    job.ports = validation.request.ports;
     return true;
 }
 
@@ -87,21 +64,19 @@ static bool parse_job_request(const httplib::Request& req, ScheduledJob& out, st
     const nlohmann::json body = nlohmann::json::parse(req.body, nullptr, false);
     if (!ensure_json_object(body, error))
         return false;
-    if (!parse_job_target(body, out, error))
+    if (!extract_target_field(body, out.target, error))
         return false;
     if (!parse_job_interval(body, out, error))
         return false;
 
     if (!extract_requested_ports_field(body, out.ports, error))
         return false;
-    if (!validate_job_ports(out, error))
-        return false;
 
     if (!extract_host_discovery_field(body, out.host_discovery_only, error))
         return false;
 
     parse_job_enabled_flag(body, out);
-    return true;
+    return validate_job_request(out, error);
 }
 
 static void handle_scheduler_jobs_list(httplib::Response& res, SchedulerService& service)

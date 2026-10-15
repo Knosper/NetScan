@@ -1,23 +1,15 @@
 #include "service/profile_service.hpp"
 #include "db/write_transaction.hpp"
-#include "scan/port_spec_validator.hpp"
-#include "scan/target_validation.hpp"
+#include "scan/scan_request_validator.hpp"
 #include "scan/scan_types.hpp"
 #include <cctype>
+#include <stdexcept>
 
 namespace
 {
 
-struct DefaultProfileSeed
-{
-    const char* name;
-    const char* target;
-    const char* ports;
-    bool        host_discovery_only;
-};
-
-const DefaultProfileSeed DEFAULT_PROFILES[] = {
-    {"localhost", "127.0.0.1", "1-1024", false},
+const ProfileWriteRequest DEFAULT_PROFILES[] = {
+    {"localhost", "127.0.0.1", "1-128", false},
     {"LAN sweep", "192.168.1.0/24", "22,80,443", false},
     {"single host", "192.168.1.10", "22,80,443,8080", false},
     {"discovery only", "192.168.0.0/16", "", true}
@@ -62,24 +54,31 @@ ProfileWriteError validate_profile_name(const std::string& name)
     return ProfileWriteError::None;
 }
 
-bool validate_profile_input(const std::string& target, const std::string& ports,
-                            bool host_discovery_only, std::string& validated_ports)
+ProfileWriteError validate_profile_input(ProfileWriteRequest& request)
 {
-    if (target.empty())
-        return false;
+    const ProfileWriteError name_error = validate_profile_name(request.name);
+    if (name_error != ProfileWriteError::None)
+        return name_error;
 
-    if (!is_valid_scan_target(target))
-        return false;
+    const ScanRequestValidation validation = validate_scan_request(
+        {request.target, request.ports, request.host_discovery_only, ""});
+    if (!validation.ok)
+        return ProfileWriteError::InvalidData;
 
-    if (host_discovery_only && !ports.empty())
-        return false;
+    request.target = validation.request.target;
+    request.ports = validation.request.ports;
+    return ProfileWriteError::None;
+}
 
-    const PortSpecValidation port_validation = validate_port_spec(ports);
-    if (!port_validation.ok)
-        return false;
-
-    validated_ports = port_validation.validated_spec;
-    return true;
+void seed_default_profiles(sqlite3* h, ProfileRepository& repo)
+{
+    for (ProfileWriteRequest request : DEFAULT_PROFILES)
+    {
+        if (validate_profile_input(request) != ProfileWriteError::None)
+            throw std::logic_error("invalid default scan profile: " + request.name);
+        if (repo.create_profile(h, request) <= 0)
+            throw std::runtime_error("failed to seed default scan profile: " + request.name);
+    }
 }
 
 } // namespace
@@ -99,44 +98,33 @@ std::vector<ScanProfile> ProfileService::list_profiles()
         WriteTransaction tx(h);
         const std::vector<ScanProfile> profiles = repo_.list_profiles(h);
         if (profiles.empty())
-        {
-            for (const DefaultProfileSeed& profile : DEFAULT_PROFILES)
-                repo_.create_profile(h, {profile.name, profile.target, profile.ports,
-                                      profile.host_discovery_only});
-        }
-        repo_.mark_default_profiles_seeded(h);
+            seed_default_profiles(h, repo_);
+        if (!repo_.mark_default_profiles_seeded(h))
+            throw std::runtime_error("failed to mark default scan profiles as seeded");
         tx.commit();
     });
 
     return db_.read([this](sqlite3* h) { return repo_.list_profiles(h); });
 }
 
-ProfileWriteResult ProfileService::create_profile(const std::string& name,
-                                                   const std::string& target,
-                                                   const std::string& ports,
-                                                   bool               host_discovery_only)
+ProfileWriteResult ProfileService::create_profile(const ProfileWriteRequest& request)
 {
-    const ProfileWriteError name_error = validate_profile_name(name);
-    if (name_error != ProfileWriteError::None)
-        return ProfileWriteResult{name_error, nullptr};
-
-    std::string validated_ports;
-    if (!validate_profile_input(target, ports, host_discovery_only, validated_ports))
-        return ProfileWriteResult{ProfileWriteError::InvalidData, nullptr};
+    ProfileWriteRequest normalized = request;
+    const ProfileWriteError error = validate_profile_input(normalized);
+    if (error != ProfileWriteError::None)
+        return ProfileWriteResult{error, nullptr};
 
     ProfileWriteResult result;
     result.profile = db_.write(
-        [this, &name, &target, &validated_ports, host_discovery_only,
-         &result](sqlite3* h) -> std::unique_ptr<ScanProfile>
+        [this, &normalized, &result](sqlite3* h) -> std::unique_ptr<ScanProfile>
         {
-            if (repo_.profile_name_exists(h, name))
+            if (repo_.profile_name_exists(h, normalized.name))
             {
                 result.error = ProfileWriteError::NameConflict;
                 return nullptr;
             }
             WriteTransaction tx(h);
-            const int id = repo_.create_profile(
-                h, {name, target, validated_ports, host_discovery_only});
+            const int id = repo_.create_profile(h, normalized);
             if (id <= 0)
                 return nullptr;
             std::unique_ptr<ScanProfile> profile = repo_.get_profile(h, id);
@@ -148,31 +136,24 @@ ProfileWriteResult ProfileService::create_profile(const std::string& name,
     return result;
 }
 
-ProfileWriteResult ProfileService::update_profile(int id, const std::string& name,
-                                                   const std::string& target,
-                                                   const std::string& ports,
-                                                   bool               host_discovery_only)
+ProfileWriteResult ProfileService::update_profile(int id, const ProfileWriteRequest& request)
 {
-    const ProfileWriteError name_error = validate_profile_name(name);
-    if (name_error != ProfileWriteError::None)
-        return ProfileWriteResult{name_error, nullptr};
-
-    std::string validated_ports;
-    if (!validate_profile_input(target, ports, host_discovery_only, validated_ports))
-        return ProfileWriteResult{ProfileWriteError::InvalidData, nullptr};
+    ProfileWriteRequest normalized = request;
+    const ProfileWriteError error = validate_profile_input(normalized);
+    if (error != ProfileWriteError::None)
+        return ProfileWriteResult{error, nullptr};
 
     ProfileWriteResult result;
     result.profile = db_.write(
-        [this, id, &name, &target, &validated_ports,
-         host_discovery_only, &result](sqlite3* h) -> std::unique_ptr<ScanProfile>
+        [this, id, &normalized, &result](sqlite3* h) -> std::unique_ptr<ScanProfile>
         {
-            if (repo_.profile_name_exists(h, name, id))
+            if (repo_.profile_name_exists(h, normalized.name, id))
             {
                 result.error = ProfileWriteError::NameConflict;
                 return nullptr;
             }
             WriteTransaction tx(h);
-            if (!repo_.update_profile(h, id, {name, target, validated_ports, host_discovery_only}))
+            if (!repo_.update_profile(h, id, normalized))
                 return nullptr;
             std::unique_ptr<ScanProfile> profile = repo_.get_profile(h, id);
             tx.commit();
