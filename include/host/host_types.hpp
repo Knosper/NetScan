@@ -13,6 +13,17 @@ struct HostMeta
     std::string tags;
 };
 
+// Partial update of HostMeta: only fields whose has_* flag is set are written.
+struct HostMetaPatch
+{
+    bool        has_display_name = false;
+    std::string display_name;
+    bool        has_role = false;
+    std::string role;
+    bool        has_tags = false;
+    std::string tags;
+};
+
 struct HostOverview
 {
     int         id = 0;

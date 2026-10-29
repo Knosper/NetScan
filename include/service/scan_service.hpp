@@ -13,6 +13,16 @@
 #include "util/logger.hpp"
 
 class SettingsService;
+
+namespace scan_retention
+{
+// Soft-deleted scans stay visible in host history for this long, then they are
+// removed for good.
+const int DELETED_RETENTION_DAYS = 7;
+// Newest finished scans that are kept; older ones are removed (scheduled jobs
+// would otherwise grow the database without bound).
+const int MAX_RETAINED_SCANS = 1000;
+}
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -82,6 +92,10 @@ public:
     };
 
     DeleteScanStatus delete_scan(int scan_id);
+    // Applies scan_retention: hard-deletes expired scans and returns the freed
+    // pages to the file system. Runs at startup and after each finished scan.
+    // Returns the number of removed scans, or -1 on error.
+    int purge_expired_scans();
     TerminateScanStatus terminate_scan(int scan_id);
     void terminate_all_running_scans(const std::string& reason);
     void on_nmap_process_started(int scan_id, const NmapProcessHandle& handle);

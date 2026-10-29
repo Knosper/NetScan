@@ -44,7 +44,7 @@ npm install
 npm run build
 ```
 
-Schema note: schema creation is idempotent, but there is no migration layer yet. During development, delete `netscan.db` after incompatible schema changes.
+Schema note: the database starts from a single base schema (`PRAGMA user_version = 1`). There is no migration step yet; the next schema change has to add one on top of version 1.
 
 ## Running
 
@@ -102,7 +102,20 @@ tls_enabled=false
 # tls_cert_path=./certs/netscan.crt
 # tls_key_path=./certs/netscan.key
 # nmap_path=/usr/bin/nmap
+# allowed_hosts=netscan.example.org
 ```
+
+## Tests and CI
+
+```bash
+make test             # fast backend unit tests
+make test-all         # full backend regression suite
+make frontend-check   # ESLint + Vitest for resources/web
+```
+
+New backend tests go to `test/src/<area>/<name>_test.cpp` and are listed once in `FAST_TESTS` or `INTEGRATION_TESTS` in `mk/tests.mk`; they link against `build/libnetscan.a`.
+
+The `CI` workflow runs on every push to `main` and every pull request: Linux and Windows build plus `make test-all`, and frontend audit, lint, tests and build. CodeQL runs weekly.
 
 ## Windows Installer
 
@@ -144,7 +157,7 @@ NetScan binds to `127.0.0.1` by default. Non-loopback binding requires an admin 
 
 - Host discovery: `nmap -sn`
 - Port scan: `nmap -Pn`, with `-p <ports>` when specified
-- Concurrent scans for the same target return `409 Conflict`
+- Concurrent scans for the same or an overlapping target return `409 Conflict`
 - Abort from UI or API terminates the nmap child process
 - All `status=up` hosts are persisted, even with zero open ports
 

@@ -37,8 +37,4 @@ bool read_optional_bool_field(const nlohmann::json& body, const char* name, bool
 // Returns false if the body is within the allowed size.
 bool reject_if_body_too_large(const httplib::Request& req, httplib::Response& res);
 
-// Validates Content-Type and body size for JSON POST requests.
-// Returns false and sets the response error on the first validation failure.
-bool validate_json_post_request(const httplib::Request& req, httplib::Response& res);
-
 #endif

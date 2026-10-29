@@ -1,6 +1,7 @@
 import React from "react";
 import { useAppContext } from "../AppContext.jsx";
 import { clearApiKey, getApiKey } from "../apiKey.js";
+import { isLoopbackHost } from "../loopback.js";
 import { ProfileRecord } from "../components/ProfileList.jsx";
 import { ProfileForm, HostDiscoveryOnlyField } from "../components/ProfileForm.jsx";
 import { PageSection, ListRegion } from "../components/PageShell.jsx";
@@ -280,8 +281,7 @@ export function ApiKeySection() {
   const isInsecure = typeof window !== "undefined"
     && window.location?.protocol
     && window.location.protocol !== "https:"
-    && window.location.hostname !== "localhost"
-    && window.location.hostname !== "127.0.0.1";
+    && !isLoopbackHost(window.location.hostname);
 
   function handleForget() {
     clearApiKey();

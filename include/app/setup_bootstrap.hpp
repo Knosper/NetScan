@@ -10,7 +10,8 @@ enum class SetupTlsMode
 {
     Disabled,
     SelfSigned,
-    ExistingFiles
+    ExistingFiles,
+    KeepExisting
 };
 
 struct SetupPlan
@@ -42,6 +43,7 @@ const char* secret_name_for_cli_key(const std::string& key_name);
 bool is_supported_key_name(const std::string& key_name);
 PersistedConfig make_setup_persisted_config();
 PersistedConfig load_setup_persisted_config(const std::string& config_path);
+std::string setup_default_web_dir(const std::string& absolute_config_path);
 bool is_readable_regular_file(const std::string& path, std::string& error);
 bool build_and_write_self_signed_cert(const std::string& ip, const std::string& cert_path,
                                       const std::string& key_path, int days, Logger& logger);

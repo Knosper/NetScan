@@ -82,12 +82,13 @@ PortSpecValidation validate_token(const std::string& token, std::set<int>& accum
     if (start_port > end_port)
         return {false, "range start must be <= end in token: '" + token + "'", ""};
 
-    // Count ports for limit check only
-    for (int p = start_port; p <= end_port; ++p)
+    // Count ports for limit check only; stop as soon as the limit is exceeded
+    // so that "1-65535" does not build a 65k-element set.
+    for (int p = start_port; p <= end_port && accumulated_ports.size() <= MAX_PORT_COUNT; ++p)
     {
         accumulated_ports.insert(p);
     }
-    
+
     out_normalized_token = start_str + "-" + end_str;
     return {true, "", ""};
 }

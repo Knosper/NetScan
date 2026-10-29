@@ -77,12 +77,23 @@ std::unique_ptr<HostDetail> HostService::get_host_detail(const std::string& ip)
         });
 }
 
-void HostService::update_host_meta(const std::string& ip, const HostMeta& meta)
+bool HostService::update_host_meta(const std::string& ip, const HostMetaPatch& patch)
 {
-    db_.write([this, &ip, &meta](sqlite3* h) { meta_repo_.upsert_meta(h, ip, meta); });
+    return db_.write([this, &ip, &patch](sqlite3* h)
+    {
+        HostMeta meta = meta_repo_.get_meta(h, ip);
+        if (patch.has_display_name)
+            meta.display_name = patch.display_name;
+        if (patch.has_role)
+            meta.role = patch.role;
+        if (patch.has_tags)
+            meta.tags = patch.tags;
+        return meta_repo_.upsert_meta(h, ip, meta);
+    });
 }
 
-void HostService::clear_host_meta_field(const std::string& ip, const std::string& field)
+bool HostService::clear_host_meta_field(const std::string& ip, const std::string& field)
 {
-    db_.write([this, &ip, &field](sqlite3* h) { meta_repo_.clear_field(h, ip, field); });
+    return db_.write([this, &ip, &field](sqlite3* h)
+                     { return meta_repo_.clear_field(h, ip, field); });
 }

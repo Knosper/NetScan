@@ -80,6 +80,24 @@ bool is_handle_finished(const NmapProcessHandle& handle)
     return is_handle_finished_locked(handle);
 }
 
+// Waits after SIGTERM or SIGKILL. A group that is gone counts as exited, and so does nmap
+// itself once the runner has reaped it: children nmap left behind are reparented and reaped by
+// init, which may take a while, and only zombies can keep the group visible after SIGKILL.
+bool wait_for_killed_process_exit(const NmapProcessHandle& handle, int timeout_ms)
+{
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (!is_process_group_alive(handle.process_group_id) || is_handle_finished(handle))
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    return !is_process_group_alive(handle.process_group_id) || is_handle_finished(handle);
+}
+
 bool send_signal_to_live_process_group(const PosixSignalRequest& request)
 {
     std::unique_lock<std::mutex> lock;
@@ -161,14 +179,25 @@ bool terminate_nmap_process(const NmapProcessHandle& handle, std::string* error)
     if (!send_signal_to_live_process_group(request))
         return false;
 
-    if (wait_for_process_group_exit(handle.process_group_id, 1000))
-        return true;
-    if (is_handle_finished(handle))
+    if (wait_for_killed_process_exit(handle, 1000))
         return true;
 
     if (error)
         *error = "nmap process group did not terminate";
     return false;
+}
+
+bool kill_nmap_process_without_wait(const NmapProcessHandle& handle, std::string* error)
+{
+    if (handle.process_group_id <= 0)
+        return true;
+
+    PosixSignalRequest request;
+    request.handle = &handle;
+    request.signal = SIGKILL;
+    request.action = "failed to send SIGKILL to nmap process group";
+    request.error = error;
+    return send_signal_to_live_process_group(request);
 }
 
 bool force_terminate_nmap_process(const NmapProcessHandle& handle, std::string* error)
@@ -184,9 +213,7 @@ bool force_terminate_nmap_process(const NmapProcessHandle& handle, std::string* 
     if (!send_signal_to_live_process_group(request))
         return false;
 
-    if (wait_for_process_group_exit(handle.process_group_id, 1000))
-        return true;
-    if (is_handle_finished(handle))
+    if (wait_for_killed_process_exit(handle, 1000))
         return true;
 
     if (error)

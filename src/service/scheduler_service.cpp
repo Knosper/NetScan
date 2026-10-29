@@ -90,11 +90,15 @@ std::unique_ptr<ScheduledJob> SchedulerService::get_job(int id)
     return db_.read([this, id](sqlite3* h) { return repo_.get_job(h, id); });
 }
 
-int SchedulerService::create_job(const ScheduledJob& job)
+int SchedulerService::create_job(const ScheduledJob& job, std::string* error)
 {
     const ScanRequestValidation validation = validate_scan_request(build_scan_request(job));
     if (!validation.ok)
+    {
+        if (error)
+            *error = validation.error_message;
         return 0;
+    }
 
     ScheduledJob normalized = job;
     normalized.target = validation.request.target;
@@ -136,6 +140,16 @@ void SchedulerService::process_job(const ScheduledJob& job,
         return;
     }
 
+    // start_async validates the request; a job stored before the current rules would
+    // otherwise be rejected (and logged) on every tick.
+    if (result.status == IScanStarter::StartAsyncStatus::ValidationError)
+    {
+        logger_.warn("Scheduler: invalid scan request in job " + std::to_string(job.id) +
+                     ": " + result.error_message + ", retrying after one interval");
+        set_run_retry_backoff(job.id, job.interval_seconds, now);
+        return;
+    }
+
     if (result.status != IScanStarter::StartAsyncStatus::Accepted)
     {
         logger_.warn("Scheduler: failed to start scan for job " + std::to_string(job.id) +
@@ -159,15 +173,7 @@ bool SchedulerService::validate_due_job(const ScheduledJob& job,
 {
     if (!job.enabled || !is_due(job.next_run_at))
         return false;
-    if (should_skip_due_to_backoff(job.id, now))
-        return false;
-    const ScanRequestValidation validation = validate_scan_request(build_scan_request(job));
-    if (validation.ok)
-        return true;
-
-    logger_.warn("Scheduler: invalid scan request in job " + std::to_string(job.id) +
-                 ": " + validation.error_message + ", skipping");
-    return false;
+    return !should_skip_due_to_backoff(job.id, now);
 }
 
 bool SchedulerService::update_job_run_times(const ScheduledJob& job)

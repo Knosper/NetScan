@@ -67,7 +67,7 @@ Checks run in this order — the first failing check produces the error:
 
 | Configuration | Result |
 |---|---|
-| `host=127.0.0.1` | Allowed (loopback HTTP or HTTPS) |
+| `host=127.0.0.1` (or `localhost`, read as `127.0.0.1`) | Allowed (loopback HTTP or HTTPS) |
 | `host=<LAN IP>` + no admin key | **Startup error** — generate key first |
 | `host=<LAN IP>` + admin key + `tls_enabled=false` | **Startup error** — TLS required |
 | `host=<LAN IP>` + admin key + `tls_enabled=true` + cert/key missing | **Startup error** — cert/key must exist and be readable |

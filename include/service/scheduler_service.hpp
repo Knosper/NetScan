@@ -24,7 +24,9 @@ public:
     // CRUD operations — safe to call from HTTP threads
     std::vector<ScheduledJob>     list_jobs();
     std::unique_ptr<ScheduledJob> get_job(int id);
-    int                           create_job(const ScheduledJob& job);
+    // Validates and normalizes target/ports; returns 0 and sets *error when invalid.
+    int                           create_job(const ScheduledJob& job,
+                                             std::string* error = nullptr);
     bool                          delete_job(int id);
     bool                          set_enabled(int id, bool enabled);
 

@@ -5,11 +5,12 @@
 
 #include "app/paths.hpp"
 #include "app/shutdown_controller.hpp"
+#include "http/api_guard.hpp"
+#include "http/api_setup_reset.hpp"
 #include "http/static_files.hpp"
 #include "util/path_utils.hpp"
 #include "httplib/httplib.h"
 #include <nlohmann/json.hpp>
-#include <cstdio>
 #include <iostream>
 #include <thread>
 
@@ -21,6 +22,7 @@ struct SetupRequest
     int port = 8080;
     bool generate_admin_key = false;
     bool generate_user_key = false;
+    SetupTlsMode tls_mode = SetupTlsMode::KeepExisting;
     std::string error;
     bool ok = false;
 };
@@ -54,6 +56,19 @@ static SetupRequest parse_setup_request(const std::string& body)
     if (j.contains("generateUserKey") && j["generateUserKey"].is_boolean())
         req.generate_user_key = j["generateUserKey"].get<bool>();
 
+    // Browser setup keeps the TLS settings of an existing config unless the user
+    // explicitly turns TLS off (e.g. because the certificate files are gone).
+    if (j.contains("tlsEnabled"))
+    {
+        if (!j["tlsEnabled"].is_boolean())
+        {
+            req.error = "field 'tlsEnabled' must be a boolean";
+            return req;
+        }
+        if (!j["tlsEnabled"].get<bool>())
+            req.tls_mode = SetupTlsMode::Disabled;
+    }
+
     req.ok = true;
     return req;
 }
@@ -65,6 +80,7 @@ static nlohmann::json run_setup_apply(const SetupRequest& req, const std::string
     plan.host = req.host;
     plan.port = req.port;
     plan.preserve_existing_config = true;
+    plan.tls_mode = req.tls_mode;
     plan.generate_admin_key = req.generate_admin_key;
     plan.generate_user_key = req.generate_user_key;
 
@@ -90,7 +106,8 @@ static nlohmann::json run_setup_apply(const SetupRequest& req, const std::string
     return result;
 }
 
-static void register_setup_info_routes(httplib::Server& svr, const SetupBind& bind)
+static void register_setup_info_routes(httplib::Server& svr, const SetupBind& bind,
+                                       bool tls_enabled)
 {
     svr.Get("/api/health",
             [](const httplib::Request&, httplib::Response& res)
@@ -99,11 +116,12 @@ static void register_setup_info_routes(httplib::Server& svr, const SetupBind& bi
             });
 
     svr.Get("/api/setup/defaults",
-            [bind](const httplib::Request&, httplib::Response& res)
+            [bind, tls_enabled](const httplib::Request&, httplib::Response& res)
             {
                 nlohmann::json out;
                 out["host"] = bind.host;
                 out["port"] = bind.port;
+                out["tlsEnabled"] = tls_enabled;
                 res.set_content(out.dump(), "application/json");
             });
 }
@@ -137,18 +155,7 @@ static void register_setup_submit_route(httplib::Server& svr, const std::string&
              });
 }
 
-static void register_setup_reset_route(httplib::Server& svr, const std::string& absolute_config_path)
-{
-    svr.Post("/api/setup/reset",
-             [absolute_config_path](const httplib::Request&, httplib::Response& res)
-             {
-                 std::remove(absolute_config_path.c_str());
-                 res.set_content(R"({"status":"ok"})", "application/json");
-                 ShutdownController::request();
-             });
-}
-
-// web_dir is already resolved relative to the configuration file or executable.
+// web_dir is resolved from the config, falling back to the UI bundled with the binary.
 static void register_setup_static_routes(httplib::Server& svr, const std::string& web_dir)
 {
     svr.Get("/app.js",
@@ -217,9 +224,10 @@ int ApplicationBootstrap::run_setup_server(const std::string& config_path, Logge
     const PersistedConfig persisted = load_setup_persisted_config(absolute_config_path);
     const std::string web_dir = resolve_runtime_config(persisted, absolute_config_path).web_dir;
 
-    register_setup_info_routes(svr, bind);
+    register_setup_request_guard(svr);
+    register_setup_info_routes(svr, bind, persisted.tls_enabled);
     register_setup_submit_route(svr, config_path, logger);
-    register_setup_reset_route(svr, absolute_config_path);
+    register_setup_reset_route(svr, absolute_config_path, logger);
     register_setup_static_routes(svr, web_dir);
 
     return run_setup_server_listen(svr, bind, absolute_config_path, logger);

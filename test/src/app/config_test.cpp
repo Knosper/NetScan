@@ -71,6 +71,10 @@ bool test_is_loopback_host()
     ok = expect(is_loopback_host("127.255.255.255"), "127.255.255.255 is loopback") && ok;
     ok = expect(is_loopback_host("127.0.0.2"), "127.0.0.2 is loopback") && ok;
     ok = expect(is_loopback_host("::1"), "::1 is loopback") && ok;
+    ok = expect(is_loopback_host("0:0:0:0:0:0:0:1"), "expanded ::1 is loopback") && ok;
+    ok = expect(!is_loopback_host("::ffff:127.0.0.1"), "IPv4-mapped loopback is not loopback") &&
+         ok;
+    ok = expect(!is_loopback_host("::"), ":: is not loopback") && ok;
 
     ok = expect(!is_loopback_host("127.foo"), "127.foo is not loopback") && ok;
     ok = expect(!is_loopback_host("127.example.com"), "127.example.com is not loopback") && ok;
@@ -166,6 +170,39 @@ bool test_round_trip()
     return ok;
 }
 
+bool test_allowed_hosts()
+{
+    bool ok = true;
+    std::string error;
+
+    PersistedConfig original = make_default_persisted_config();
+    original.allowed_hosts = "netscan.example, NAS.lan";
+    const std::string path = write_tmp("cfg_allowed_hosts.ini",
+                                       serialize_persisted_config(original));
+    const PersistedConfig loaded = load_persisted_config(path);
+    ok = expect(loaded.allowed_hosts == original.allowed_hosts, "round-trip allowed_hosts") && ok;
+    ok = expect(validate_persisted_config_for_startup(loaded, error),
+                "hostname list passes validation: " + error) && ok;
+
+    const std::vector<std::string> names = resolve_runtime_config(loaded, path).allowed_hosts;
+    ok = expect(names.size() == 2 && names[0] == "netscan.example" && names[1] == "nas.lan",
+                "allowed_hosts are trimmed and lower-cased") && ok;
+    ok = expect(parse_allowed_hosts(" , ,").empty(), "empty entries are ignored") && ok;
+    ok = expect(serialize_persisted_config(make_default_persisted_config())
+                        .find("allowed_hosts") == std::string::npos,
+                "default config omits allowed_hosts") && ok;
+
+    PersistedConfig wildcard = original;
+    wildcard.allowed_hosts = "*.example";
+    ok = expect(!validate_persisted_config_for_startup(wildcard, error),
+                "wildcard entries are rejected") && ok;
+    PersistedConfig with_port = original;
+    with_port.allowed_hosts = "netscan.example:443";
+    ok = expect(!validate_persisted_config_for_startup(with_port, error),
+                "entries with a port are rejected") && ok;
+    return ok;
+}
+
 bool test_validate_persisted_config_required_fields()
 {
     bool ok = true;
@@ -193,6 +230,136 @@ bool test_validate_persisted_config_required_fields()
     ok = expect(!validate_persisted_config_for_startup(no_web_dir, error),
                 "empty web_dir fails validation") && ok;
 
+    return ok;
+}
+
+bool test_is_valid_bind_host()
+{
+    bool ok = true;
+    ok = expect(is_valid_bind_host("127.0.0.1"), "IPv4 literal is a valid host") && ok;
+    ok = expect(is_valid_bind_host("0.0.0.0"), "IPv4 any address is a valid host") && ok;
+    ok = expect(is_valid_bind_host("::"), "IPv6 any address is a valid host") && ok;
+    ok = expect(is_valid_bind_host("fe80::1"), "IPv6 literal is a valid host") && ok;
+    ok = expect(is_valid_bind_host("localhost"), "hostname is a valid host") && ok;
+    ok = expect(is_valid_bind_host("netscan-1.lan"), "dotted hostname is a valid host") && ok;
+
+    ok = expect(!is_valid_bind_host(""), "empty host is rejected") && ok;
+    ok = expect(!is_valid_bind_host("127.0.0.1\nnmap_path=/tmp/x"),
+                "host with newline is rejected") && ok;
+    ok = expect(!is_valid_bind_host("127.0.0.1\rnmap_path=/tmp/x"),
+                "host with carriage return is rejected") && ok;
+    ok = expect(!is_valid_bind_host("host=evil"), "host with '=' is rejected") && ok;
+    ok = expect(!is_valid_bind_host("[::1]"), "bracketed IPv6 is rejected") && ok;
+    ok = expect(!is_valid_bind_host("bad host"), "host with space is rejected") && ok;
+    ok = expect(!is_valid_bind_host("-lead.example"), "label starting with '-' is rejected") && ok;
+    ok = expect(!is_valid_bind_host("a..b"), "empty label is rejected") && ok;
+    ok = expect(!is_valid_bind_host(std::string(64, 'a')), "label over 63 chars is rejected") && ok;
+    return ok;
+}
+
+bool test_validate_rejects_line_breaks_in_values()
+{
+    bool ok = true;
+    std::string error;
+    const PersistedConfig base = make_default_persisted_config();
+
+    PersistedConfig host = base;
+    host.host = "127.0.0.1\nnmap_path=/tmp/x";
+    ok = expect(!validate_persisted_config_for_startup(host, error),
+                "host with newline fails validation") && ok;
+    ok = expect(error == "field 'host' must not contain control characters",
+                "host newline error names the field") && ok;
+
+    const struct
+    {
+        std::string name;
+        std::string PersistedConfig::*member;
+    } fields[] = {
+        {"db_path", &PersistedConfig::db_path},
+        {"web_dir", &PersistedConfig::web_dir},
+        {"log_file", &PersistedConfig::log_file},
+        {"tls_cert_path", &PersistedConfig::tls_cert_path},
+        {"tls_key_path", &PersistedConfig::tls_key_path},
+        {"nmap_path", &PersistedConfig::nmap_path},
+    };
+    for (const auto& field : fields)
+    {
+        PersistedConfig injected = base;
+        injected.*field.member = "./x\nnmap_path=/tmp/evil";
+        const std::string& name = field.name;
+        error.clear();
+        ok = expect(!validate_persisted_config_for_startup(injected, error),
+                    name + " with newline fails validation") && ok;
+        ok = expect(error.find(name) != std::string::npos, name + " error names the field") && ok;
+    }
+
+    PersistedConfig tab = base;
+    tab.nmap_path = "/usr/bin/nmap\t";
+    ok = expect(!validate_persisted_config_for_startup(tab, error),
+                "value with tab fails validation") && ok;
+
+    PersistedConfig hostname = base;
+    hostname.host = "localhost";
+    ok = expect(validate_persisted_config_for_startup(hostname, error),
+                "hostname passes validation") && ok;
+    return ok;
+}
+
+bool test_writer_refuses_injected_config()
+{
+    bool ok = true;
+    const std::string path = write_tmp("netscan_config_injection_test.ini", "host=127.0.0.1\n");
+    ok = expect(!path.empty(), "injection fixture written") && ok;
+
+    PersistedConfig injected = make_default_persisted_config();
+    injected.host = "127.0.0.1\nnmap_path=/tmp/evil";
+    std::string error;
+    ok = expect(!write_persisted_config_atomically(path, injected, error),
+                "writer refuses a host with newline") && ok;
+
+    const PersistedConfig loaded = load_persisted_config(path);
+    ok = expect(loaded.host == "127.0.0.1", "existing config is left untouched") && ok;
+    ok = expect(loaded.nmap_path.empty(), "no nmap_path was injected") && ok;
+    std::remove(path.c_str());
+    return ok;
+}
+
+bool test_localhost_rules()
+{
+    bool ok = true;
+    ok = expect(is_loopback_request_host("localhost"), "localhost Host header is loopback") && ok;
+    ok = expect(is_loopback_request_host("LocalHost"), "Host header match ignores case") && ok;
+    ok = expect(is_loopback_request_host("::1"), "::1 Host header is loopback") && ok;
+    ok = expect(!is_loopback_request_host("localhost.evil.example"),
+                "localhost subdomain Host header is not loopback") && ok;
+
+    ok = expect(normalize_bind_host("localhost") == "127.0.0.1", "localhost bind -> 127.0.0.1") && ok;
+    ok = expect(normalize_bind_host("LOCALHOST") == "127.0.0.1", "LOCALHOST bind -> 127.0.0.1") && ok;
+    ok = expect(normalize_bind_host("netscan.lan") == "netscan.lan", "other hostnames unchanged") &&
+         ok;
+
+    const std::string path = write_tmp("netscan_localhost_test.ini", "host=localhost\n");
+    ok = expect(!path.empty(), "localhost fixture written") && ok;
+    ok = expect(load_persisted_config(path).host == "127.0.0.1",
+                "host=localhost is loaded as 127.0.0.1") && ok;
+    std::remove(path.c_str());
+    return ok;
+}
+
+bool test_validate_bind_security()
+{
+    bool ok = true;
+    std::string error;
+    ok = expect(validate_bind_security("127.0.0.1", false, false, error), "loopback needs nothing") &&
+         ok;
+    ok = expect(!validate_bind_security("192.168.1.10", false, true, error) &&
+                    error.find("admin API key") != std::string::npos,
+                "non-loopback without key is refused") && ok;
+    ok = expect(!validate_bind_security("192.168.1.10", true, false, error) &&
+                    error.find("requires TLS") != std::string::npos,
+                "non-loopback without TLS is refused") && ok;
+    ok = expect(validate_bind_security("192.168.1.10", true, true, error),
+                "non-loopback with key and TLS is allowed") && ok;
     return ok;
 }
 
@@ -244,7 +411,13 @@ int main()
     all_ok = test_serialize_persisted_config_emits_tls_paths() && all_ok;
     all_ok = test_parse_errors() && all_ok;
     all_ok = test_round_trip() && all_ok;
+    all_ok = test_allowed_hosts() && all_ok;
     all_ok = test_validate_persisted_config_required_fields() && all_ok;
     all_ok = test_apply_cli_overrides() && all_ok;
+    all_ok = test_localhost_rules() && all_ok;
+    all_ok = test_validate_bind_security() && all_ok;
+    all_ok = test_is_valid_bind_host() && all_ok;
+    all_ok = test_validate_rejects_line_breaks_in_values() && all_ok;
+    all_ok = test_writer_refuses_injected_config() && all_ok;
     return finish_test("config_test", all_ok);
 }

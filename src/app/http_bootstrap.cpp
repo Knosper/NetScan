@@ -49,7 +49,7 @@ static void shutdown_services(ServerRunContext& ctx)
 }
 
 // Tries to bind server on configured_port, then configured_port+1 … +PORT_RETRY_RANGE.
-// Only retries on 127.0.0.1: non-loopback deployments expect a fixed port (firewall,
+// Only retries on loopback binds: non-loopback deployments expect a fixed port (firewall,
 // reverse-proxy) so a silent port change there would break the deployment silently.
 // Returns the bound port on success, -1 on failure.
 static int bind_with_retry(Server& server, const std::string& host, int configured_port,
@@ -58,7 +58,7 @@ static int bind_with_retry(Server& server, const std::string& host, int configur
     if (server.bind(host, configured_port))
         return configured_port;
 
-    if (host != "127.0.0.1")
+    if (!is_loopback_host(host))
     {
         logger.error(bind_error_message(host, configured_port));
         return -1;

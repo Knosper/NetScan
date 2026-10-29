@@ -8,6 +8,7 @@
 #include "test_output.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace
@@ -116,9 +117,10 @@ bool check_seed_rollback(Database& db, ProfileService& profiles)
             "WHEN NEW.name='LAN sweep' BEGIN SELECT RAISE(ABORT, 'test failure'); END;",
             nullptr, nullptr, nullptr);
     });
-    bool failed = false;
-    try { profiles.list_profiles(); }
-    catch (const std::runtime_error&) { failed = true; }
+    bool threw = false;
+    std::size_t listed = 1;
+    try { listed = profiles.list_profiles().size(); }
+    catch (const std::exception&) { threw = true; }
     const bool rolled_back = db.read([&db](sqlite3* h) {
         ProfileRepository repo(db);
         return repo.list_profiles(h).empty() && !repo.are_default_profiles_seeded(h);
@@ -126,8 +128,67 @@ bool check_seed_rollback(Database& db, ProfileService& profiles)
     db.write([](sqlite3* h) {
         return sqlite3_exec(h, "DROP TRIGGER reject_default_profile;", nullptr, nullptr, nullptr);
     });
-    return expect(failed && rolled_back, "failed seed should roll back rows and seeded marker") &&
+    return expect(!threw && listed == 0, "failed seed should still return the profile list") &&
+           expect(rolled_back, "failed seed should roll back rows and seeded marker") &&
            expect(profiles.list_profiles().size() == 4, "failed seed should be safely retryable");
+}
+
+bool check_marker_failure(Database& db, ProfileService& profiles)
+{
+    db.write([](sqlite3* h) {
+        return sqlite3_exec(h, "DELETE FROM scan_profiles;"
+            "DELETE FROM app_metadata WHERE key='default_scan_profiles_seeded';"
+            "CREATE TRIGGER reject_seed_marker BEFORE INSERT ON app_metadata "
+            "WHEN NEW.key='default_scan_profiles_seeded' "
+            "BEGIN SELECT RAISE(ABORT, 'test failure'); END;",
+            nullptr, nullptr, nullptr);
+    });
+    bool threw = false;
+    std::size_t listed = 0;
+    try { listed = profiles.list_profiles().size(); }
+    catch (const std::exception&) { threw = true; }
+    db.write([](sqlite3* h) {
+        return sqlite3_exec(h, "DROP TRIGGER reject_seed_marker;", nullptr, nullptr, nullptr);
+    });
+    const std::size_t retried = profiles.list_profiles().size();
+    const bool marked = db.read([&db](sqlite3* h) {
+        return ProfileRepository(db).are_default_profiles_seeded(h);
+    });
+    return expect(!threw && listed == 4, "failed seed marker should not fail the profile list") &&
+           expect(retried == 4 && marked, "marker retry should not duplicate default profiles");
+}
+
+int read_user_version(Database& db)
+{
+    return db.read([](sqlite3* h) {
+        int version = -1;
+        sqlite3_exec(h, "PRAGMA user_version;",
+            [](void* out, int, char** values, char**) {
+                *static_cast<int*>(out) = values[0] ? std::atoi(values[0]) : -1;
+                return 0;
+            }, &version, nullptr);
+        return version;
+    });
+}
+
+bool check_base_schema_version(Database& db, Logger& logger)
+{
+    bool ok = expect(read_user_version(db) == 1, "base schema should set user_version 1");
+    init_schema(db, logger);
+    ok = expect(read_user_version(db) == 1, "re-running init_schema should keep user_version") && ok;
+
+    db.write([](sqlite3* h) { sqlite3_exec(h, "PRAGMA user_version = 2;", nullptr, nullptr, nullptr); });
+    bool threw = false;
+    try
+    {
+        init_schema(db, logger);
+    }
+    catch (const std::runtime_error&)
+    {
+        threw = true;
+    }
+    db.write([](sqlite3* h) { sqlite3_exec(h, "PRAGMA user_version = 1;", nullptr, nullptr, nullptr); });
+    return expect(threw, "a database from a newer schema version should be rejected") && ok;
 }
 } // namespace
 
@@ -151,6 +212,8 @@ int main()
         ok = check_rejected_requests(services) && ok;
         ok = check_normalized_requests(services) && ok;
         ok = check_seed_rollback(db, profiles) && ok;
+        ok = check_marker_failure(db, profiles) && ok;
+        ok = check_base_schema_version(db, logger) && ok;
     }
     std::remove(path.c_str());
     return finish_test("profile_service_test", ok);

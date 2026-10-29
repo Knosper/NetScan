@@ -1,5 +1,5 @@
 import React from "react";
-import { stateKindFromValue, toneForStateKind, toTitleCase } from "./ui/helpers.js";
+import { stateKindFromValue, toneForStateKind } from "./ui/helpers.js";
 import { getPortRisk } from "./data/portRiskLookup.js";
 
 export function BrandMark() {
@@ -186,7 +186,7 @@ const SEVERITY_TONE = {
     critical: "danger",
 };
 
-export function PortRiskBadge({ port, protocol }) {
+export function PortRiskBadge({ port }) {
     const entry = getPortRisk(port);
     if (!entry) return null;
     const tone = SEVERITY_TONE[entry.severity] || "muted";

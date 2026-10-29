@@ -160,5 +160,16 @@ int main()
     all_ok = expect(is_valid_scan_target("  192.168.1.1  "),
                     "target with surrounding whitespace must be accepted after trim") && all_ok;
 
+    all_ok = expect(scan_targets_overlap("10.0.0.0/24", "10.0.0.5"),
+                    "network should overlap a contained host") && all_ok;
+    all_ok = expect(scan_targets_overlap("10.0.0.5", "10.0.0.0/24"),
+                    "overlap should be symmetric") && all_ok;
+    all_ok = expect(!scan_targets_overlap("10.0.0.0/25", "10.0.0.128/25"),
+                    "adjacent networks should not overlap") && all_ok;
+    all_ok = expect(scan_targets_overlap("fd00::/64", "fd00::1"),
+                    "IPv6 network should overlap a contained host") && all_ok;
+    all_ok = expect(!scan_targets_overlap("10.0.0.1", "fd00::1"),
+                    "IPv4 and IPv6 targets should not overlap") && all_ok;
+
     return finish_test("target_validation_test", all_ok);
 }

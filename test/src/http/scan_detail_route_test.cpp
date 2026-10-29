@@ -359,6 +359,54 @@ int main()
             }
 
             {
+                httplib::Result patched = client.Patch(
+                    "/api/hosts/127.0.0.1/meta",
+                    R"({"displayName":"Router","role":"gateway","tags":["lan","core"]})",
+                    "application/json");
+                all_ok = expect_response_status(patched, 200, "PATCH /api/hosts/:ip/meta") &&
+                         all_ok;
+
+                patched = client.Patch("/api/hosts/127.0.0.1/meta", R"({"role":"switch"})",
+                                       "application/json");
+                all_ok = expect_response_status(patched, 200,
+                                                "partial PATCH /api/hosts/:ip/meta") &&
+                         all_ok;
+
+                httplib::Result detail = client.Get("/api/hosts/127.0.0.1");
+                all_ok = expect_response_status(detail, 200, "host detail after meta PATCH") &&
+                         all_ok;
+                if (detail)
+                {
+                    const nlohmann::json meta = nlohmann::json::parse(detail->body)["meta"];
+                    all_ok = expect(meta.value("displayName", "") == "Router" &&
+                                        meta.value("role", "") == "switch" &&
+                                        meta.value("tags", "") == "lan,core",
+                                    "partial PATCH should keep untouched meta fields") &&
+                             all_ok;
+                }
+
+                for (const std::string& bad_body : {std::string("not json"), std::string("[1]")})
+                {
+                    httplib::Result bad = client.Patch("/api/hosts/127.0.0.1/meta", bad_body,
+                                                       "application/json");
+                    all_ok = expect_response_status(bad, 400,
+                                                    "PATCH meta rejects body " + bad_body) &&
+                             all_ok;
+                }
+
+                httplib::Result bad_ip = client.Patch("/api/hosts/not-an-ip/meta",
+                                                      R"({"role":"x"})", "application/json");
+                all_ok = expect_response_status(bad_ip, 400, "PATCH meta rejects invalid ip") &&
+                         all_ok;
+
+                httplib::Result restricted = restricted_client.Patch(
+                    "/api/hosts/127.0.0.1/meta", R"({"role":"x"})", "application/json");
+                all_ok = expect_response_status(restricted, 403,
+                                                "restricted key cannot PATCH host meta") &&
+                         all_ok;
+            }
+
+            {
                 httplib::Result result = client.Get("/api/dashboard");
                 all_ok = expect_response_status(result, 200, "GET /api/dashboard") && all_ok;
                 if (result)

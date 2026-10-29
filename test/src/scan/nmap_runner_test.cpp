@@ -16,6 +16,9 @@
 #ifdef __linux__
 #include <dirent.h>
 #endif
+#ifdef _WIN32
+#include "util/windows_executable_path.hpp"
+#endif
 #include "test_output.hpp"
 
 namespace
@@ -161,6 +164,161 @@ ProcessSpec make_target_process(const std::string& flag, const std::string& targ
     process.args.push_back(target);
     return process;
 }
+
+#ifdef _WIN32
+std::wstring make_windows_temp_dir()
+{
+    wchar_t temp_dir[MAX_PATH];
+    const DWORD length = GetTempPathW(MAX_PATH, temp_dir);
+    if (length == 0 || length >= MAX_PATH)
+        return std::wstring();
+    const std::wstring path = std::wstring(temp_dir) + L"netscan-runner-test-" +
+                              std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId()));
+    if (CreateDirectoryW(path.c_str(), nullptr) == 0 && GetLastError() != ERROR_ALREADY_EXISTS)
+        return std::wstring();
+    return path;
+}
+
+bool create_empty_file(const std::wstring& path)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+    CloseHandle(file);
+    return true;
+}
+
+std::string wide_to_utf8(const std::wstring& input)
+{
+    const int length = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, nullptr, 0, nullptr,
+                                           nullptr);
+    if (length <= 0)
+        return std::string();
+    std::vector<char> buffer(static_cast<std::vector<char>::size_type>(length));
+    WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, &buffer[0], length, nullptr, nullptr);
+    return std::string(&buffer[0]);
+}
+
+bool run_windows_resolver_tests(const std::wstring& planted_dir)
+{
+    bool all_ok = true;
+    const std::wstring planted_exe = planted_dir + L"\\netscan-probe.exe";
+    std::wstring resolved;
+    std::string error;
+
+    all_ok = expect(util::resolve_windows_executable("netscan-probe", planted_dir, resolved, error) &&
+                        resolved == planted_exe,
+                    "bare name should resolve through an absolute PATH entry with .exe") &&
+             all_ok;
+    all_ok = expect(util::resolve_windows_executable("netscan-probe", L"\"" + planted_dir + L"\"",
+                                               resolved, error),
+                    "quoted PATH entries should be searched") &&
+             all_ok;
+
+    // The probe sits in the current directory, which CreateProcess would search before PATH.
+    error.clear();
+    all_ok = expect(!util::resolve_windows_executable("netscan-probe", util::windows_system_directory(), resolved,
+                                                error),
+                    "bare name must not resolve from the current directory") &&
+             all_ok;
+    all_ok = expect(error.find("not found in PATH") != std::string::npos,
+                    "missing executable should report a PATH lookup error") &&
+             all_ok;
+    all_ok = expect(!util::resolve_windows_executable("netscan-probe", L".;netscan-relative", resolved,
+                                                error),
+                    "relative PATH entries must be skipped") &&
+             all_ok;
+
+    error.clear();
+    all_ok = expect(!util::resolve_windows_executable(".\\netscan-probe.exe", planted_dir, resolved,
+                                                error) &&
+                        error.find("must be absolute") != std::string::npos,
+                    "relative executable paths must be rejected") &&
+             all_ok;
+    all_ok = expect(!util::resolve_windows_executable("C:netscan-probe.exe", planted_dir, resolved,
+                                                error),
+                    "drive-relative executable paths must be rejected") &&
+             all_ok;
+
+    const std::string planted_exe_utf8 = wide_to_utf8(planted_exe);
+    all_ok = expect(util::resolve_windows_executable(planted_exe_utf8, L"", resolved, error) &&
+                        resolved == planted_exe,
+                    "absolute executable path should be used as configured") &&
+             all_ok;
+    all_ok = expect(!util::resolve_windows_executable(planted_exe_utf8 + ".missing", L"", resolved,
+                                                error),
+                    "missing absolute executable path should be rejected") &&
+             all_ok;
+    return all_ok;
+}
+
+bool run_windows_process_start_tests()
+{
+    bool all_ok = true;
+    const std::wstring planted_dir = make_windows_temp_dir();
+    const std::wstring planted_exe = planted_dir + L"\\netscan-probe.exe";
+    wchar_t original_dir[MAX_PATH];
+    const DWORD original_dir_length = GetCurrentDirectoryW(MAX_PATH, original_dir);
+    if (!expect(!planted_dir.empty() && create_empty_file(planted_exe) &&
+                    original_dir_length > 0 && original_dir_length < MAX_PATH &&
+                    SetCurrentDirectoryW(planted_dir.c_str()) != 0,
+                "windows process-start test setup should succeed"))
+        return false;
+
+    all_ok = run_windows_resolver_tests(planted_dir) && all_ok;
+
+    {
+        // Before the fix CreateProcess picked the planted (invalid) file from the current
+        // directory and failed with "not a valid Win32 application".
+        ProcessSpec process;
+        process.executable = "netscan-probe";
+        const NmapRunResult result = run_nmap_process(process);
+        all_ok = expect(!result.ok && result.error.find("not found in PATH") != std::string::npos,
+                        "runner must not start an executable planted in the current directory") &&
+                 all_ok;
+    }
+
+    SetCurrentDirectoryW(original_dir);
+    DeleteFileW(planted_exe.c_str());
+    RemoveDirectoryW(planted_dir.c_str());
+
+    {
+        SECURITY_ATTRIBUTES inheritable;
+        inheritable.nLength = sizeof(inheritable);
+        inheritable.lpSecurityDescriptor = nullptr;
+        inheritable.bInheritHandle = TRUE;
+        HANDLE unrelated_read = nullptr;
+        HANDLE unrelated_write = nullptr;
+        all_ok = expect(CreatePipe(&unrelated_read, &unrelated_write, &inheritable, 0) != 0,
+                        "inheritance test pipe should be created") &&
+                 all_ok;
+
+        CapturingListener listener;
+        NmapRunResult result;
+        std::thread runner([&result, &listener]()
+                           { result = run_nmap_process(make_shell_process(long_running_shell_command()),
+                                                       nullptr, &listener); });
+        all_ok = expect(listener.wait_for_start(5000),
+                        "inheritance test process should start") &&
+                 all_ok;
+
+        // If the child had inherited the unrelated write end, the pipe would stay open.
+        CloseHandle(unrelated_write);
+        DWORD available = 0;
+        const BOOL peeked = PeekNamedPipe(unrelated_read, nullptr, 0, nullptr, &available, nullptr);
+        all_ok = expect(peeked == 0 && GetLastError() == ERROR_BROKEN_PIPE,
+                        "child must inherit only its own std handles") &&
+                 all_ok;
+        CloseHandle(unrelated_read);
+
+        terminate_nmap_process(listener.current_handle(), nullptr);
+        runner.join();
+    }
+
+    return all_ok;
+}
+#endif
 } // namespace
 
 int main()
@@ -711,6 +869,10 @@ int main()
         all_ok = expect(fds_after <= fds_before,
                         "fd-leak: no file descriptors should leak after a complete run") && all_ok;
     }
+#endif
+
+#ifdef _WIN32
+    all_ok = run_windows_process_start_tests() && all_ok;
 #endif
 
     return finish_test("nmap_runner_test", all_ok);

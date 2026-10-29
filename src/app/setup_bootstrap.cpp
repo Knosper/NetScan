@@ -92,7 +92,12 @@ bool parse_setup_host_port(const nlohmann::json& body, std::string& host, int& p
             error = "field 'host' must not be empty";
             return false;
         }
-        parsed_host = h;
+        if (!is_valid_bind_host(h))
+        {
+            error = "field 'host' must be an IP address or hostname";
+            return false;
+        }
+        parsed_host = normalize_bind_host(h);
     }
 
     if (body.contains("port"))
@@ -250,13 +255,27 @@ PersistedConfig make_setup_persisted_config()
     persisted.ui_enabled = true;
     return persisted;
 }
+// Keeps the relative default web_dir when the config lives next to the binary (as the
+// CLI setup writes it), so moving the installation does not break the UI. Any other
+// config location needs the absolute path of the bundled UI.
+std::string setup_default_web_dir(const std::string& absolute_config_path)
+{
+    const std::string executable_dir = get_executable_dir();
+    if (dir_of(absolute_config_path) == executable_dir)
+        return make_default_persisted_config().web_dir;
+    return join_path(executable_dir, "resources/web");
+}
+
 PersistedConfig load_setup_persisted_config(const std::string& config_path)
 {
     const bool config_exists = path_exists(config_path);
     PersistedConfig persisted = config_exists
         ? load_persisted_config(config_path) : make_setup_persisted_config();
-    if (!config_exists)
-        persisted.web_dir = join_path(get_executable_dir(), "resources/web");
+    // A reset or hand-written config may point web_dir at a directory without the UI
+    // (e.g. the relative default next to a custom --config path). Setup must still load.
+    const std::string web_dir = resolve_runtime_config(persisted, config_path).web_dir;
+    if (!config_exists || !is_regular_file(join_path(web_dir, "index.html")))
+        persisted.web_dir = setup_default_web_dir(to_absolute_path(config_path));
     persisted.ui_enabled = true;
     persisted.setup_pending = false;
     return persisted;
@@ -358,8 +377,13 @@ static bool persist_generated_api_keys(const SetupPlan& plan, const AppConfig& r
 bool apply_setup_tls_plan(const SetupPlan& plan, const std::string& config_dir,
                                  PersistedConfig& persisted, Logger& logger, std::string& error)
 {
-    if (plan.tls_mode == SetupTlsMode::Disabled)
+    if (plan.tls_mode == SetupTlsMode::KeepExisting)
         return true;
+    if (plan.tls_mode == SetupTlsMode::Disabled)
+    {
+        persisted.tls_enabled = false;
+        return true;
+    }
 
     persisted.tls_enabled = true;
     if (plan.tls_mode == SetupTlsMode::ExistingFiles)
@@ -405,6 +429,19 @@ bool validate_setup_tls_files(const PersistedConfig& persisted,
     return true;
 }
 
+static bool setup_admin_key_available(const SetupPlan& plan, const AppConfig& runtime_config,
+                                      Logger& logger)
+{
+    if (plan.generate_admin_key)
+        return true;
+    // No database yet means no stored key; do not create one just to look.
+    if (!path_exists(runtime_config.db_path))
+        return false;
+    Database db(runtime_config.db_path);
+    initialize_database(db, runtime_config, logger);
+    return admin_api_key_exists(db);
+}
+
 // Applies the shared setup side effects for both CLI and browser setup:
 // build/validate persisted config, write it atomically, and optionally persist API keys.
 SetupResult apply_setup_plan(const SetupPlan& plan, const std::string& config_path,
@@ -424,6 +461,8 @@ SetupResult apply_setup_plan(const SetupPlan& plan, const std::string& config_pa
 
     PersistedConfig persisted = plan.preserve_existing_config
         ? load_setup_persisted_config(absolute_config_path) : make_setup_persisted_config();
+    if (!plan.preserve_existing_config)
+        persisted.web_dir = setup_default_web_dir(absolute_config_path);
     persisted.host = plan.host;
     persisted.port = plan.port;
 
@@ -433,8 +472,19 @@ SetupResult apply_setup_plan(const SetupPlan& plan, const std::string& config_pa
     if (!validate_persisted_config_for_startup(persisted, result.error))
         return result;
     const AppConfig runtime_config = resolve_runtime_config(persisted, absolute_config_path);
-    if (!validate_setup_tls_files(persisted, absolute_config_path, result.error))
+    // Loopback binds skip the database lookup: they need neither key nor TLS.
+    const bool has_admin_key = is_loopback_host(persisted.host) ||
+                               setup_admin_key_available(plan, runtime_config, logger);
+    if (!validate_bind_security(persisted.host, has_admin_key, persisted.tls_enabled,
+                                result.error))
         return result;
+    if (!validate_setup_tls_files(persisted, absolute_config_path, result.error))
+    {
+        if (plan.tls_mode == SetupTlsMode::KeepExisting)
+            result.error = "existing TLS configuration is unusable (" + result.error +
+                           "); disable TLS or restore the certificate files";
+        return result;
+    }
     if (!persist_generated_api_keys(plan, runtime_config, logger, result))
         return result;
     if (!write_persisted_config_atomically(absolute_config_path, persisted, result.error))

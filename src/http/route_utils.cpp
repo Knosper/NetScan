@@ -4,10 +4,8 @@
 #include "scan/target_validation.hpp"
 #include "util/string_utils.hpp"
 
-#include <cctype>
 #include <climits>
 #include <cerrno>
-#include <algorithm>
 #include <cstdlib>
 
 namespace
@@ -72,10 +70,7 @@ bool has_json_content_type(const httplib::Request& req)
     if (semicolon_pos != std::string::npos)
         content_type = content_type.substr(0, semicolon_pos);
 
-    content_type = util::trim(content_type);
-    std::transform(content_type.begin(), content_type.end(), content_type.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return content_type == "application/json";
+    return util::to_lower_ascii(util::trim(content_type)) == "application/json";
 }
 
 std::size_t max_json_request_body_bytes()
@@ -251,20 +246,5 @@ bool reject_if_body_too_large(const httplib::Request& req, httplib::Response& re
 
     set_json_error(res, JsonError{http_status::PAYLOAD_TOO_LARGE, "payload_too_large",
                                   json_body_too_large_message()});
-    return true;
-}
-
-bool validate_json_post_request(const httplib::Request& req, httplib::Response& res)
-{
-    if (!has_json_content_type(req))
-    {
-        set_json_error(res, JsonError{http_status::UNSUPPORTED_MEDIA_TYPE,
-                                      "unsupported_media_type",
-                                      "Content-Type must be application/json"});
-        return false;
-    }
-    if (reject_if_body_too_large(req, res))
-        return false;
-
     return true;
 }

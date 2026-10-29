@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { BrandMark } from "../atoms.jsx";
 import { fetchWithTimeout } from "../api.js";
 import { getApiKey } from "../apiKey.js";
+import { isLoopbackHost } from "../loopback.js";
 
 function Field({ label, children }) {
     return (
@@ -18,6 +19,8 @@ function SetupForm({ onDone }) {
     const [port, setPort] = useState("8080");
     const [generateAdminKey, setGenerateAdminKey] = useState(false);
     const [generateUserKey, setGenerateUserKey] = useState(false);
+    const [tlsConfigured, setTlsConfigured] = useState(false);
+    const [keepTls, setKeepTls] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState(null);
 
@@ -37,6 +40,7 @@ function SetupForm({ onDone }) {
                     }
                 }
                 if (Number.isInteger(data.port)) setPort(String(data.port));
+                if (data.tlsEnabled === true) setTlsConfigured(true);
             })
             .catch(() => {});
         return () => { cancelled = true; };
@@ -55,7 +59,10 @@ function SetupForm({ onDone }) {
             const res = await fetchWithTimeout("/api/setup", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ host, port: portNum, generateAdminKey, generateUserKey })
+                body: JSON.stringify({
+                    host, port: portNum, generateAdminKey, generateUserKey,
+                    ...(tlsConfigured ? { tlsEnabled: keepTls } : {})
+                })
             });
             const data = await res.json();
             if (!res.ok) { setError(data.error || "Setup failed"); setSubmitting(false); return; }
@@ -101,9 +108,11 @@ function SetupForm({ onDone }) {
                             placeholder="0.0.0.0"
                             disabled={submitting}
                         />
-                        <div className="setup-warning">
-                            Binding to a custom address exposes NetScan on the network. Ensure you use an API key and secure transport.
-                        </div>
+                        {!isLoopbackHost(customHost.trim()) && (
+                            <div className="setup-warning">
+                                Binding to a non-loopback address exposes NetScan on the network. It requires an admin API key and TLS.
+                            </div>
+                        )}
                     </>
                 )}
             </Field>
@@ -139,6 +148,22 @@ function SetupForm({ onDone }) {
                     Generate restricted user API key
                 </label>
                 <span className="setup-hint">Read-only access to scan data.</span>
+                {tlsConfigured && (
+                    <>
+                        <label className="setup-checkbox-label">
+                            <input
+                                type="checkbox"
+                                checked={keepTls}
+                                onChange={e => setKeepTls(e.target.checked)}
+                                disabled={submitting}
+                            />
+                            Keep HTTPS (TLS) enabled
+                        </label>
+                        <span className="setup-hint">
+                            Uses the certificate from the existing config. Turn off if the certificate files are missing; non-loopback addresses require TLS.
+                        </span>
+                    </>
+                )}
             </Field>
             {error && <div className="setup-error">{error}</div>}
             <button className="setup-submit" type="submit" disabled={submitting}>
@@ -185,6 +210,12 @@ function setupHealthHeaders(result) {
     return storedKey ? { "X-API-Key": storedKey } : {};
 }
 
+// 429 only means the new server is still throttling; keep polling instead of giving up.
+function retryDelayMs(response) {
+    const seconds = Number(response.headers.get("Retry-After"));
+    return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 5000) : 1000;
+}
+
 function SetupDone({ result }) {
     const hasKeys = result.adminKey || result.userKey;
     const targetUrl = setupTargetUrl(result);
@@ -204,7 +235,8 @@ function SetupDone({ result }) {
                 const response = await fetchWithTimeout(new URL("/api/health", targetUrl).href,
                     { headers: setupHealthHeaders(result) }, 2000);
                 if (cancelled) return;
-                if ([401, 403, 429].includes(response.status)) { setServerState("auth"); return; }
+                if (response.status === 429) { timeoutId = setTimeout(poll, retryDelayMs(response)); return; }
+                if ([401, 403].includes(response.status)) { setServerState("auth"); return; }
                 const data = response.ok ? await response.json() : null;
                 if (cancelled) return;
                 if (data?.mode === "normal") { setServerState("ready"); return; }
@@ -248,7 +280,7 @@ function SetupDone({ result }) {
             )}
             {serverState === "auth" && (
                 <div className="setup-warning">
-                    Readiness could not be verified because authentication was rejected or rate limited.
+                    Readiness could not be verified because authentication was rejected.
                     Save your keys, then open NetScan and sign in.
                 </div>
             )}

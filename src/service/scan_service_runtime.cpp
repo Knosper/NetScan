@@ -1,4 +1,5 @@
 #include "service/scan_runtime.hpp"
+#include "scan/target_validation.hpp"
 
 #include <algorithm>
 
@@ -27,6 +28,12 @@ bool ScanRuntime::has_active_scans() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return !active_scans_.empty();
+}
+
+std::size_t ScanRuntime::active_scan_count() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return active_scans_.size();
 }
 
 std::size_t ScanRuntime::active_chunked_scan_count() const
@@ -86,12 +93,12 @@ ScanRuntime::StatusSnapshot ScanRuntime::get_status_snapshot() const
     return snap;
 }
 
-bool ScanRuntime::is_target_active(const std::string& target) const
+bool ScanRuntime::overlaps_active_target(const std::string& target) const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto it = active_scans_.begin(); it != active_scans_.end(); ++it)
     {
-        if (it->second.target == target)
+        if (scan_targets_overlap(it->second.target, target))
             return true;
     }
     return false;

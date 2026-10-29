@@ -215,13 +215,6 @@ function buildHostNode(node, position, ports, localIp)
     };
 }
 
-function buildDisplayNode(node, position, ports, localIp)
-{
-    if (node.type === "gateway")
-        return buildGatewayNode(node, position);
-    return buildHostNode(node, position, ports || [], localIp);
-}
-
 // Returns "192.168.1" for "192.168.1.42", null for non-IPv4 or unparseable.
 function extractSlash24Prefix(ip)
 {

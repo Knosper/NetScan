@@ -14,6 +14,7 @@
 #include "service/scan_result_builders.hpp"
 #include "service/scan_persistence.hpp"
 #include "util/logger.hpp"
+#include "util/windows_executable_path.hpp"
 #include "util/time_utils.hpp"
 
 #include <atomic>
@@ -28,6 +29,9 @@
 
 namespace
 {
+// Each active scan owns a worker thread and at least one nmap process, so different
+// targets must not be able to start an unbounded number of them.
+constexpr std::size_t MAX_ACTIVE_SCANS = 4;
 constexpr std::size_t MAX_ACTIVE_CHUNKED_SCANS = 1;
 
 struct ScanStorage
@@ -267,6 +271,7 @@ static int seconds_since_utc_timestamp(const std::string& ts)
     return diff >= 0 ? static_cast<int>(diff) : 0;
 }
 
+#ifndef _WIN32
 bool file_exists(const std::string& path)
 {
     if (path.empty())
@@ -275,6 +280,7 @@ bool file_exists(const std::string& path)
     std::ifstream file(path.c_str(), std::ios::in | std::ios::binary);
     return static_cast<bool>(file);
 }
+#endif
 
 } // namespace
 
@@ -284,6 +290,7 @@ ScanService::ScanService(Database& db, Logger& logger, SettingsService* settings
     : db_(db), logger_(logger), repo_(db), settings_(settings)
 {
     reconcile_incomplete_scans();
+    purge_expired_scans();
 }
 
 void ScanService::set_nmap_path(const std::string& path)
@@ -453,8 +460,12 @@ void ScanService::on_nmap_process_started(int scan_id, const NmapProcessHandle& 
     if (!should_terminate)
         return;
 
+    // Runs on the worker thread, which reaps the process only after this callback returns.
+    // A waiting terminate would keep the process group alive as a zombie and stall the
+    // abort for the full TERM and KILL timeouts. The scan is already aborted, so kill
+    // right away and let the runner collect the exit.
     std::string error;
-    if (!terminate_nmap_process(handle, &error))
+    if (!kill_nmap_process_without_wait(handle, &error))
         logger_.error("failed to terminate nmap process after abort request: " + error);
 }
 
@@ -552,11 +563,22 @@ ScanService::StartAsyncResult ScanService::check_dependencies() const
 
 ScanService::StartAsyncResult ScanService::check_configured_nmap_path() const
 {
+#ifdef _WIN32
+    // Same lookup as the runner, so a path it would refuse (e.g. relative) is
+    // rejected here instead of failing after the scan was accepted.
+    std::wstring resolved;
+    std::string error;
+    if (util::resolve_windows_executable(nmap_path_, util::current_windows_search_path(),
+                                         resolved, error))
+        return {StartAsyncStatus::Accepted, -1, ""};
+    return {StartAsyncStatus::DependencyMissing, -1, "configured nmap path unusable: " + error};
+#else
     if (file_exists(nmap_path_))
         return {StartAsyncStatus::Accepted, -1, ""};
 
     return {StartAsyncStatus::DependencyMissing, -1,
             "configured nmap path not found: " + nmap_path_};
+#endif
 }
 
 // Returns a rejected result if the chunk plan violates policy, or Accepted otherwise.
@@ -605,8 +627,12 @@ ScanService::StartAsyncResult ScanService::dispatch_scan_worker(const ScanReques
     const ScanStorage storage{db_, repo_, logger_};
 
     std::lock_guard<std::mutex> start_lock(start_mutex_);
-    if (runtime_.is_target_active(normalized_request.target))
-        return {StartAsyncStatus::Conflict, -1, "a scan for this target is already running"};
+    if (runtime_.overlaps_active_target(normalized_request.target))
+        return {StartAsyncStatus::Conflict, -1,
+                "a scan for this or an overlapping target is already running"};
+
+    if (runtime_.active_scan_count() >= MAX_ACTIVE_SCANS)
+        return {StartAsyncStatus::PolicyViolation, -1, "too many scans are already running"};
 
     const ScanChunkPlan chunk_plan = plan_scan_chunks(normalized_request);
     {
@@ -691,6 +717,34 @@ ScanService::DeleteScanStatus ScanService::delete_scan(int scan_id)
                 return validation;
             return perform_soft_delete(h, tx, scan_id, scan->target);
         });
+}
+
+int ScanService::purge_expired_scans()
+{
+    const std::time_t cutoff = std::time(nullptr) -
+        static_cast<std::time_t>(scan_retention::DELETED_RETENTION_DAYS) * 24 * 60 * 60;
+    const std::string deleted_before = util::format_utc_time(cutoff, "%Y-%m-%d %H:%M:%S");
+
+    const int purged = db_.write(
+        [this, &deleted_before](sqlite3* h)
+        {
+            WriteTransaction tx(h, &logger_);
+            const int removed =
+                repo_.purge_scans(h, deleted_before, scan_retention::MAX_RETAINED_SCANS);
+            if (removed < 0)
+                return -1;
+            tx.commit();
+            // Without auto_vacuum=INCREMENTAL (set by init_schema) this is a no-op.
+            if (removed > 0)
+                sqlite3_exec(h, "PRAGMA incremental_vacuum;", nullptr, nullptr, nullptr);
+            return removed;
+        });
+
+    if (purged < 0)
+        logger_.error("failed to purge expired scans");
+    else if (purged > 0)
+        logger_.info("purged " + std::to_string(purged) + " expired scan(s)");
+    return purged;
 }
 
 // Returns the termination status for a scan that was not found in the active runtime.
@@ -940,6 +994,7 @@ void ScanService::finalize_scan_completion(const ScanExecutionResult& execution)
         runtime_.clear_transient_terminal(execution.input.scan_id);
         runtime_.clear_active(execution.input.scan_id);
     }
+    purge_expired_scans();
 }
 
 void ScanService::reap_finished_workers()

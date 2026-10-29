@@ -2,7 +2,6 @@
 #include "http/http_status.hpp"
 #include "http/responses.hpp"
 #include "http/route_utils.hpp"
-#include "scan/scan_request_validator.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -38,20 +37,6 @@ static bool parse_job_interval(const nlohmann::json& body, ScheduledJob& out, st
     return true;
 }
 
-static bool validate_job_request(ScheduledJob& job, std::string& error)
-{
-    const ScanRequestValidation validation = validate_scan_request(
-        {job.target, job.ports, job.host_discovery_only, ""});
-    if (!validation.ok)
-    {
-        error = validation.error_message;
-        return false;
-    }
-    job.target = validation.request.target;
-    job.ports = validation.request.ports;
-    return true;
-}
-
 static void parse_job_enabled_flag(const nlohmann::json& body, ScheduledJob& out)
 {
     nlohmann::json::const_iterator enabled_it = body.find("enabled");
@@ -76,7 +61,7 @@ static bool parse_job_request(const httplib::Request& req, ScheduledJob& out, st
         return false;
 
     parse_job_enabled_flag(body, out);
-    return validate_job_request(out, error);
+    return true;
 }
 
 static void handle_scheduler_jobs_list(httplib::Response& res, SchedulerService& service)
@@ -103,9 +88,16 @@ static void handle_scheduler_job_create(const httplib::Request& req, httplib::Re
         return;
     }
 
-    int id = service.create_job(job);
+    std::string validation_error;
+    int id = service.create_job(job, &validation_error);
     if (id <= 0)
     {
+        if (!validation_error.empty())
+        {
+            set_json_error(res, JsonError{http_status::BAD_REQUEST, "bad_request",
+                                          validation_error});
+            return;
+        }
         set_json_error(res, JsonError{http_status::INTERNAL_SERVER_ERROR, "internal_error",
                                       "failed to create job"});
         return;

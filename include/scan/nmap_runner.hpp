@@ -64,5 +64,9 @@ NmapRunResult run_nmap_process(const ProcessSpec& process, Logger* logger = null
 bool terminate_nmap_process(const NmapProcessHandle& handle, std::string* error = nullptr);
 bool force_terminate_nmap_process(const NmapProcessHandle& handle,
                                   std::string* error = nullptr);
+// Kills the process without waiting for it to exit. Use this from the thread that runs
+// run_nmap_process: that thread reaps the child, so waiting there would only time out.
+bool kill_nmap_process_without_wait(const NmapProcessHandle& handle,
+                                    std::string* error = nullptr);
 
 #endif

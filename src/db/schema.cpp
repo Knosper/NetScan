@@ -237,6 +237,23 @@ void create_all_tables(sqlite3* h)
     create_indexes(h);
 }
 
+// Version of the base schema created by create_all_tables. Later schema changes get
+// numbered migration steps on top of it.
+constexpr int SCHEMA_VERSION = 1;
+
+int read_schema_version(sqlite3* h)
+{
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(h, "PRAGMA user_version;", -1, &stmt, nullptr) != SQLITE_OK)
+        throw std::runtime_error(sqlite3_errmsg(h));
+
+    int version = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return version;
+}
+
 } // namespace
 
 void init_schema(Database& db, Logger& logger)
@@ -244,7 +261,20 @@ void init_schema(Database& db, Logger& logger)
     db.write([&logger](sqlite3* h)
     {
         logger.info("Initializing database schema");
+        const int version = read_schema_version(h);
+        if (version > SCHEMA_VERSION)
+        {
+            throw std::runtime_error("database schema version " + std::to_string(version) +
+                                     " is newer than supported version " +
+                                     std::to_string(SCHEMA_VERSION));
+        }
+        // New database: lets purged scans give their pages back via
+        // PRAGMA incremental_vacuum. Switching auto_vacuum needs a VACUUM once the
+        // file exists (journal_mode=WAL already created it); it is still empty here.
+        if (version == 0)
+            exec_sql(h, "PRAGMA auto_vacuum = INCREMENTAL; VACUUM;");
         create_all_tables(h);
+        exec_sql(h, "PRAGMA user_version = " + std::to_string(SCHEMA_VERSION) + ";");
         logger.info("Schema initialization completed");
     });
 }

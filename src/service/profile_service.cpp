@@ -2,6 +2,7 @@
 #include "db/write_transaction.hpp"
 #include "scan/scan_request_validator.hpp"
 #include "scan/scan_types.hpp"
+#include "util/string_utils.hpp"
 #include <cctype>
 #include <stdexcept>
 
@@ -30,24 +31,13 @@ bool contains_null_byte(const std::string& value)
     return value.find('\0') != std::string::npos;
 }
 
-bool contains_control_characters(const std::string& value)
-{
-    for (std::string::const_iterator it = value.begin(); it != value.end(); ++it)
-    {
-        const unsigned char ch = static_cast<unsigned char>(*it);
-        if (ch < 0x20 || ch == 0x7F)
-            return true;
-    }
-    return false;
-}
-
 ProfileWriteError validate_profile_name(const std::string& name)
 {
     if (!has_visible_character(name))
         return ProfileWriteError::NameEmpty;
     if (contains_null_byte(name))
         return ProfileWriteError::NameNullByte;
-    if (contains_control_characters(name))
+    if (util::contains_control_characters(name))
         return ProfileWriteError::NameControlChar;
     if (name.size() > MAX_PROFILE_NAME_LENGTH)
         return ProfileWriteError::NameTooLong;
@@ -70,15 +60,16 @@ ProfileWriteError validate_profile_input(ProfileWriteRequest& request)
     return ProfileWriteError::None;
 }
 
-void seed_default_profiles(sqlite3* h, ProfileRepository& repo)
+bool seed_default_profiles(sqlite3* h, ProfileRepository& repo)
 {
     for (ProfileWriteRequest request : DEFAULT_PROFILES)
     {
         if (validate_profile_input(request) != ProfileWriteError::None)
             throw std::logic_error("invalid default scan profile: " + request.name);
         if (repo.create_profile(h, request) <= 0)
-            throw std::runtime_error("failed to seed default scan profile: " + request.name);
+            return false;
     }
+    return true;
 }
 
 } // namespace
@@ -95,12 +86,14 @@ std::vector<ScanProfile> ProfileService::list_profiles()
         if (repo_.are_default_profiles_seeded(h))
             return;
 
+        // Seeding is best effort: listing must not fail because of it. A failed seed is
+        // rolled back and retried on the next call. A failed marker keeps the seeded rows;
+        // the next call only retries the marker because the table is no longer empty.
         WriteTransaction tx(h);
         const std::vector<ScanProfile> profiles = repo_.list_profiles(h);
-        if (profiles.empty())
-            seed_default_profiles(h, repo_);
-        if (!repo_.mark_default_profiles_seeded(h))
-            throw std::runtime_error("failed to mark default scan profiles as seeded");
+        if (profiles.empty() && !seed_default_profiles(h, repo_))
+            return;
+        repo_.mark_default_profiles_seeded(h);
         tx.commit();
     });
 

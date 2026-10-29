@@ -10,3 +10,4 @@ tls_enabled=false
 # tls_cert_path=./certs/netscan.crt
 # tls_key_path=./certs/netscan.key
 # nmap_path=/usr/bin/nmap
+# allowed_hosts=netscan.example.org

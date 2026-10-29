@@ -29,6 +29,9 @@ public:
     // Returns true if any scan is currently active.
     bool has_active_scans() const;
 
+    // Returns the number of active scans, chunked or not.
+    std::size_t active_scan_count() const;
+
     // Returns the number of active scans using chunked execution.
     std::size_t active_chunked_scan_count() const;
 
@@ -47,7 +50,8 @@ public:
     StatusSnapshot get_status_snapshot() const;
 
     // Returns true if a scan with the given target is currently active.
-    bool is_target_active(const std::string& target) const;
+    // True when an active scan covers any address of `target`.
+    bool overlaps_active_target(const std::string& target) const;
 
     // Registers a new active scan entry (initial state).
     void register_active(int scan_id, const std::string& target, bool chunked = false);

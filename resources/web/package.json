@@ -2,10 +2,12 @@
   "name": "netscan-web",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19"
   },
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "lint": "eslint .",
+    "test": "vitest run"
   },
   "dependencies": {
     "react": "18.3.1",
@@ -13,6 +15,14 @@
     "reactflow": "11.11.4"
   },
   "devDependencies": {
-    "esbuild": "0.28.1"
+    "@eslint/js": "9.39.5",
+    "@testing-library/react": "16.3.3",
+    "esbuild": "0.28.1",
+    "eslint": "9.39.5",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.13.0",
+    "jsdom": "26.1.0",
+    "vitest": "4.1.12"
   }
 }

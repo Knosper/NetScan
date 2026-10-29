@@ -201,6 +201,53 @@ bool ScanRepository::soft_delete_scan_by_id(sqlite3* h, int scan_id,
     return exec_write_step_one_row(stmt.ptr, h);
 }
 
+int ScanRepository::purge_scans(sqlite3* h, const std::string& deleted_before,
+                                int max_retained)
+{
+    // ?1 = deleted_before, ?2 = max_retained. A NULL MIN() (no finished scans)
+    // makes the comparison false, so nothing beyond the limit is selected.
+    // The count limit never removes the newest completed scan of a comparable
+    // series (target, mode, ports): it is the diff baseline of the next scan and
+    // tells presence that the target was already scanned.
+    static const std::string PURGED_IDS =
+        "SELECT id FROM scans WHERE "
+        "(deleted_at IS NOT NULL AND deleted_at < ?1) OR "
+        "(deleted_at IS NULL AND status NOT IN ('queued', 'running') AND id < ("
+        "  SELECT MIN(id) FROM (SELECT id FROM scans "
+        "  WHERE deleted_at IS NULL AND status NOT IN ('queued', 'running') "
+        "  ORDER BY id DESC LIMIT ?2)) "
+        " AND id NOT IN (SELECT MAX(id) FROM scans "
+        "  WHERE deleted_at IS NULL AND status = 'completed' "
+        "  GROUP BY target, host_discovery_only, requested_ports))";
+    static const char* const CHILD_TABLES[] = {"scan_hosts", "scan_ports",
+                                               "scan_port_coverage", "scan_notes"};
+
+    for (const char* table : CHILD_TABLES)
+    {
+        const std::string sql = std::string("DELETE FROM ") + table +
+                                " WHERE scan_id IN (" + PURGED_IDS + ");";
+        Stmt stmt;
+        stmt.ptr = db_prepare(h, sql.c_str());
+        if (!stmt.ptr)
+            return -1;
+        sqlite3_bind_text(stmt.ptr, 1, deleted_before.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt.ptr, 2, max_retained);
+        if (!exec_write_step(stmt.ptr))
+            return -1;
+    }
+
+    const std::string sql = "DELETE FROM scans WHERE id IN (" + PURGED_IDS + ");";
+    Stmt stmt;
+    stmt.ptr = db_prepare(h, sql.c_str());
+    if (!stmt.ptr)
+        return -1;
+    sqlite3_bind_text(stmt.ptr, 1, deleted_before.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt.ptr, 2, max_retained);
+    if (!exec_write_step(stmt.ptr))
+        return -1;
+    return db_changes(h);
+}
+
 std::unique_ptr<PersistedScanSummary> ScanRepository::get_latest_scan(sqlite3* h)
 {
     const std::string sql = std::string("SELECT ") + scan_summary_projection_sql() +

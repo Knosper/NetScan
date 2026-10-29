@@ -66,16 +66,10 @@ void validate_startup(const AppConfig& config, const AuthConfig& auth_config,
             "Startup auth error: restricted API key is configured but no admin API key exists. "
             "Run './netscan --generate-key admin' first.");
 
-    if (!is_loopback_host(config.host) && auth_config.admin_api_key_hash.empty())
-        throw std::runtime_error(
-            "Startup auth error: non-loopback binding requires an admin API key; "
-            "run './netscan --generate-key admin' first");
-
-    if (!is_loopback_host(config.host) && !config.tls_enabled)
-        throw std::runtime_error(
-            "Startup error: non-loopback binding requires TLS; "
-            "set tls_enabled=true and configure tls_cert_path/tls_key_path in conf.ini. "
-            "See docs/tls-setup.md");
+    std::string bind_error;
+    if (!validate_bind_security(config.host, !auth_config.admin_api_key_hash.empty(),
+                                config.tls_enabled, bind_error))
+        throw std::runtime_error("Startup error: " + bind_error);
 
     if (!is_loopback_host(config.host) && config.tls_enabled)
         logger.info("TLS enabled for network binding on " + config.host + ":" +

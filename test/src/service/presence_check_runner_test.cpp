@@ -236,6 +236,45 @@ bool test_ping_pure_dash_target_windows()
 #endif
 }
 
+// Windows-specific: a ping.exe in the current directory must not replace the system ping.
+bool test_ping_ignores_planted_ping_windows()
+{
+#ifndef _WIN32
+    return true; // Windows-only test; no-op on POSIX
+#else
+    wchar_t temp_dir[MAX_PATH];
+    const DWORD temp_length = GetTempPathW(MAX_PATH, temp_dir);
+    wchar_t previous_dir[MAX_PATH];
+    const DWORD previous_length = GetCurrentDirectoryW(MAX_PATH, previous_dir);
+    if (!expect(temp_length > 0 && temp_length < MAX_PATH && previous_length > 0 &&
+                    previous_length < MAX_PATH,
+                "Windows: planted ping fixture paths should resolve"))
+        return false;
+
+    const std::wstring planted_dir =
+        std::wstring(temp_dir) + L"netscan-presence-test-" +
+        std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId()));
+    const std::wstring planted_ping = planted_dir + L"\\ping.exe";
+    CreateDirectoryW(planted_dir.c_str(), nullptr);
+    HANDLE file = CreateFileW(planted_ping.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE)
+        CloseHandle(file);
+    const bool setup_ok =
+        file != INVALID_HANDLE_VALUE && SetCurrentDirectoryW(planted_dir.c_str()) != 0;
+
+    DefaultPresenceCheckRunner runner;
+    const PresenceCheckResult result = runner.run(make_ping_tracker("127.0.0.1"));
+
+    SetCurrentDirectoryW(previous_dir);
+    DeleteFileW(planted_ping.c_str());
+    RemoveDirectoryW(planted_dir.c_str());
+    return expect(setup_ok, "Windows: planted ping fixture should be created") &&
+           expect(result.status == "up",
+                  "Windows: ping must come from the system directory, not the current directory");
+#endif
+}
+
 struct ScopedTestServer
 {
     httplib::Server svr;
@@ -390,6 +429,7 @@ int main()
     all_ok = test_unsupported_check_type_returns_error() && all_ok;
     all_ok = test_ping_leading_dash_target() && all_ok;
     all_ok = test_ping_pure_dash_target_windows() && all_ok;
+    all_ok = test_ping_ignores_planted_ping_windows() && all_ok;
 
     all_ok = test_http_check_2xx_returns_up() && all_ok;
     all_ok = test_http_check_5xx_returns_down() && all_ok;

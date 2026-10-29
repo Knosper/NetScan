@@ -335,6 +335,15 @@ bool cidr_contains(const ParsedCidr& outer, const ParsedCidr& inner)
 }
 } // namespace
 
+bool scan_targets_overlap(const std::string& a, const std::string& b)
+{
+    ParsedCidr left;
+    ParsedCidr right;
+    if (!try_parse_ip_or_cidr(a, left) || !try_parse_ip_or_cidr(b, right))
+        return a == b;
+    return cidr_contains(left, right) || cidr_contains(right, left);
+}
+
 bool is_user_target_allowed(const std::string& target,
                             const std::vector<std::string>& user_allowed_targets)
 {

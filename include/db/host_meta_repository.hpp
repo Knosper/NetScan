@@ -13,8 +13,10 @@ public:
     explicit HostMetaRepository(Database& db);
 
     HostMeta get_meta(sqlite3* h, const std::string& ip);
-    void upsert_meta(sqlite3* h, const std::string& ip, const HostMeta& meta);
-    void clear_field(sqlite3* h, const std::string& ip, const std::string& field);
+    // Returns false if the statement fails.
+    bool upsert_meta(sqlite3* h, const std::string& ip, const HostMeta& meta);
+    // Returns false for an unknown field or if the statement fails.
+    bool clear_field(sqlite3* h, const std::string& ip, const std::string& field);
 };
 
 #endif

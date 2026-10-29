@@ -33,6 +33,10 @@ struct MethodRegistry
 
 void register_api_key_guard(httplib::Server& svr, const AppConfig& config,
                             const AuthConfig& auth_config);
+// CSRF / DNS-rebinding protection for the unauthenticated setup server:
+// loopback Host allowlist, same-origin check and JSON Content-Type for writes,
+// plus no-store / anti-framing response headers.
+void register_setup_request_guard(httplib::Server& svr);
 void register_api_response_headers(httplib::Server& svr, const AppConfig& config);
 void register_error_handlers(httplib::Server& svr, const MethodRegistry& registry);
 

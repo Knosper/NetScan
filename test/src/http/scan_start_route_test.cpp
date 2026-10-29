@@ -383,7 +383,8 @@ bool expect_conflict_while_scan_running(httplib::Client& client, ScanService& se
     if (second_result)
     {
         const nlohmann::json second_payload = nlohmann::json::parse(second_result->body);
-        all_ok = expect_api_error_body(second_payload, "conflict", "a scan is already running") &&
+        all_ok = expect_api_error_body(second_payload, "conflict",
+                                       "a scan for this or an overlapping target is already running") &&
                  all_ok;
     }
 

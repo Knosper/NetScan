@@ -7,6 +7,7 @@
 #include "test_output.hpp"
 #include "util/logger.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <memory>
@@ -14,6 +15,11 @@
 #include <thread>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 int count_scan_rows(Database& db)
 {
@@ -122,6 +128,47 @@ int main()
         all_ok = expect(running_scan_id > 0, "running fixture should persist") && all_ok;
 
         ScanService service(db, logger);
+
+#ifndef _WIN32
+        {
+            // A process that starts after the abort is killed from the worker thread, which
+            // has not reaped it yet. The kill must not wait for an exit that cannot happen.
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                setpgid(0, 0);
+                signal(SIGTERM, SIG_IGN);
+                for (;;)
+                    pause();
+            }
+            all_ok = expect(child > 0, "late-start fixture process should fork") && all_ok;
+            if (child > 0)
+            {
+                setpgid(child, child);
+                NmapProcessHandle late_handle;
+                late_handle.pid = child;
+                late_handle.process_group_id = child;
+                late_handle.lifecycle = std::make_shared<NmapProcessLifecycle>();
+
+                const std::chrono::steady_clock::time_point started =
+                    std::chrono::steady_clock::now();
+                service.on_nmap_process_started(987654, late_handle);
+                const long long elapsed_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+                all_ok = expect(elapsed_ms < 500,
+                                "late process start after abort should be killed without waiting") &&
+                         all_ok;
+
+                int status = 0;
+                const bool reaped = waitpid(child, &status, 0) == child;
+                all_ok = expect(reaped && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL,
+                                "late process start after abort should be killed") &&
+                         all_ok;
+            }
+        }
+#endif
 
         std::unique_ptr<PersistedScanSummary> queued_scan = service.get_scan(queued_scan_id);
         all_ok = expect(queued_scan != nullptr, "reconciled queued scan should remain readable") &&
@@ -540,6 +587,80 @@ int main()
     }
 
     std::remove(chunk_policy_db_path.c_str());
+
+    const std::string scan_limit_db_path =
+        make_temp_db_path("/tmp/netscan-scan-limit-test-XXXXXX.db");
+    all_ok = expect(!scan_limit_db_path.empty(),
+                    "scan limit database path should be created") &&
+             all_ok;
+    if (!all_ok)
+        return finish_test("scan_abort_service_test", false);
+
+    {
+        ScopedFakeNmap fake_nmap("/tmp/netscan-fake-scan-limit-nmap-XXXXXX",
+                                 "<nmaprun></nmaprun>", true);
+        all_ok = expect(fake_nmap.ready(),
+                        "scan limit fake nmap environment should be created") &&
+                 all_ok;
+
+        Database db(scan_limit_db_path);
+        Logger logger;
+        configure_database_runtime(db, logger);
+        init_schema(db, logger);
+        ScanService service(db, logger);
+
+        std::vector<int> started_ids;
+        for (int i = 1; i <= 4; ++i)
+        {
+            const ScanService::StartAsyncResult started =
+                service.start_async({"127.0.0." + std::to_string(i), "22", false, ""});
+            all_ok = expect(started.status == ScanService::StartAsyncStatus::Accepted,
+                            "scans below the global limit should start") &&
+                     all_ok;
+            if (started.status == ScanService::StartAsyncStatus::Accepted)
+                started_ids.push_back(started.scan_id);
+        }
+
+        const ScanService::StartAsyncResult overlapping =
+            service.start_async({"127.0.0.0/30", "22", false, ""});
+        all_ok = expect(overlapping.status == ScanService::StartAsyncStatus::Conflict,
+                        "a network containing an active target should conflict") &&
+                 all_ok;
+
+        const ScanService::StartAsyncResult over_limit =
+            service.start_async({"127.0.0.5", "22", false, ""});
+        all_ok = expect(over_limit.status == ScanService::StartAsyncStatus::PolicyViolation,
+                        "a scan for a new target should be rejected at the global limit") &&
+                 all_ok;
+        all_ok = expect(over_limit.error_message == "too many scans are already running",
+                        "global scan limit should return a clear policy message") &&
+                 all_ok;
+        all_ok = expect(count_scan_rows(db) == 4,
+                        "rejected scan should not create a queued scan row") &&
+                 all_ok;
+
+        service.terminate_all_running_scans("terminated during scan limit test");
+        for (const int scan_id : started_ids)
+        {
+            all_ok = expect(wait_for_scan_state(service, scan_id,
+                                                PersistedScanState::Aborted, 5000),
+                            "scan limit fixture should clean up running scans") &&
+                     all_ok;
+        }
+
+        const ScanService::StartAsyncResult after_abort =
+            service.start_async({"127.0.0.5", "22", false, ""});
+        all_ok = expect(after_abort.status == ScanService::StartAsyncStatus::Accepted,
+                        "a freed slot should accept a new scan") &&
+                 all_ok;
+        service.terminate_all_running_scans("terminated during scan limit test");
+        all_ok = expect(wait_for_scan_state(service, after_abort.scan_id,
+                                            PersistedScanState::Aborted, 5000),
+                        "scan limit fixture should clean up the last scan") &&
+                 all_ok;
+    }
+
+    std::remove(scan_limit_db_path.c_str());
 
     const std::string chunk_size_db_path =
         make_temp_db_path("/tmp/netscan-scan-chunk-size-test-XXXXXX.db");

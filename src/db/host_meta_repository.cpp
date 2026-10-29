@@ -31,7 +31,7 @@ HostMeta HostMetaRepository::get_meta(sqlite3* h, const std::string& ip)
     return meta;
 }
 
-void HostMetaRepository::upsert_meta(sqlite3* h, const std::string& ip, const HostMeta& meta)
+bool HostMetaRepository::upsert_meta(sqlite3* h, const std::string& ip, const HostMeta& meta)
 {
     const char* sql =
         "INSERT INTO host_meta(ip, display_name, role, tags) VALUES(?,?,?,?) "
@@ -40,16 +40,16 @@ void HostMetaRepository::upsert_meta(sqlite3* h, const std::string& ip, const Ho
     Stmt stmt;
     stmt.ptr = db_prepare(h, sql);
     if (!stmt.ptr)
-        return;
+        return false;
 
     sqlite3_bind_text(stmt.ptr, 1, ip.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt.ptr, 2, meta.display_name.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt.ptr, 3, meta.role.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt.ptr, 4, meta.tags.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt.ptr);
+    return sqlite3_step(stmt.ptr) == SQLITE_DONE;
 }
 
-void HostMetaRepository::clear_field(sqlite3* h, const std::string& ip,
+bool HostMetaRepository::clear_field(sqlite3* h, const std::string& ip,
                                       const std::string& field)
 {
     const char* sql = nullptr;
@@ -60,13 +60,13 @@ void HostMetaRepository::clear_field(sqlite3* h, const std::string& ip,
     else if (field == "tags")
         sql = "UPDATE host_meta SET tags='' WHERE ip=?;";
     else
-        return;
+        return false;
 
     Stmt stmt;
     stmt.ptr = db_prepare(h, sql);
     if (!stmt.ptr)
-        return;
+        return false;
 
     sqlite3_bind_text(stmt.ptr, 1, ip.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt.ptr);
+    return sqlite3_step(stmt.ptr) == SQLITE_DONE;
 }

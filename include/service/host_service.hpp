@@ -18,8 +18,10 @@ public:
     std::vector<HostOverview> list_hosts(const HostListFilter& filter, int limit = 500, int offset = 0);
     int count_hosts(const HostListFilter& filter);
     std::unique_ptr<HostDetail> get_host_detail(const std::string& ip);
-    void update_host_meta(const std::string& ip, const HostMeta& meta);
-    void clear_host_meta_field(const std::string& ip, const std::string& field);
+    // Updates only the fields set in patch; the others keep their stored value.
+    // Returns false if the database write fails.
+    bool update_host_meta(const std::string& ip, const HostMetaPatch& patch);
+    bool clear_host_meta_field(const std::string& ip, const std::string& field);
     // Prunes current host ports with persisted state == "closed".
     int prune_closed_ports();
 

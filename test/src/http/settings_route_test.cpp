@@ -1,6 +1,7 @@
 #include "app/app_context.hpp"
 #include "app/config.hpp"
 #include "app/paths.hpp"
+#include "app/setup_bootstrap.hpp"
 #include "app/setup_server.hpp"
 #include "db/allowed_target_repository.hpp"
 #include "db/database.hpp"
@@ -78,6 +79,88 @@ bool expect_standard_api_headers(const httplib::Result& result, const std::strin
     ok = expect(result->get_header_value("Cache-Control") == "no-store",
                 label + " should set Cache-Control: no-store") &&
          ok;
+    return ok;
+}
+
+bool write_tls_config_without_cert_files(const std::string& path)
+{
+    std::ofstream f(path.c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
+    f << "host=127.0.0.1\n"
+      << "port=8443\n"
+      << "db_path=./netscan.db\n"
+      << "web_dir=./resources/web\n"
+      << "log_level=info\n"
+      << "tls_enabled=true\n"
+      << "tls_cert_path=./missing-netscan.crt\n"
+      << "tls_key_path=./missing-netscan.key\n";
+    return f.good();
+}
+
+bool test_setup_host_validation()
+{
+    bool ok = true;
+    std::string host = "127.0.0.1";
+    int port = 8080;
+    std::string error;
+
+    nlohmann::json injected = {{"host", "127.0.0.1\nnmap_path=/tmp/evil"}, {"port", 8080}};
+    ok = expect(!parse_setup_host_port(injected, host, port, error),
+                "setup body with a newline in host should be rejected") && ok;
+    ok = expect(error == "field 'host' must be an IP address or hostname",
+                "setup host rejection should explain the expected format") && ok;
+    ok = expect(host == "127.0.0.1", "rejected setup host must not be applied") && ok;
+
+    nlohmann::json valid = {{"host", "0.0.0.0"}, {"port", 9443}};
+    ok = expect(parse_setup_host_port(valid, host, port, error) && host == "0.0.0.0" &&
+                    port == 9443,
+                "setup body with an IP literal should be accepted") && ok;
+    return ok;
+}
+
+bool test_browser_setup_tls_and_web_dir(const std::string& conf_path, Logger& logger)
+{
+    bool ok = expect(write_tls_config_without_cert_files(conf_path),
+                     "TLS setup fixture should be written");
+
+    SetupPlan plan;
+    plan.host = "127.0.0.1";
+    plan.port = 8080;
+    plan.preserve_existing_config = true;
+    plan.tls_mode = SetupTlsMode::KeepExisting;
+    const SetupResult kept = apply_setup_plan(plan, conf_path, logger);
+    ok = expect(!kept.ok && kept.error.find("disable TLS") != std::string::npos,
+                "keeping TLS with missing certificate files should explain how to recover") && ok;
+
+    plan.host = "0.0.0.0";
+    plan.tls_mode = SetupTlsMode::Disabled;
+    const SetupResult keyless = apply_setup_plan(plan, conf_path, logger);
+    ok = expect(!keyless.ok && keyless.error.find("admin API key") != std::string::npos,
+                "browser setup should refuse a non-loopback bind without an admin key") && ok;
+
+    plan.generate_admin_key = true;
+    const SetupResult exposed = apply_setup_plan(plan, conf_path, logger);
+    ok = expect(!exposed.ok && exposed.error.find("requires TLS") != std::string::npos,
+                "browser setup should refuse a non-loopback bind without TLS") && ok;
+    plan.generate_admin_key = false;
+
+    plan.host = "127.0.0.1";
+    const SetupResult disabled = apply_setup_plan(plan, conf_path, logger);
+    ok = expect(disabled.ok && !disabled.tls_enabled,
+                "browser setup should be able to turn existing TLS off") && ok;
+    const PersistedConfig written = load_persisted_config(conf_path);
+    ok = expect(!written.tls_enabled, "disabled TLS should be persisted") && ok;
+    ok = expect(written.web_dir == join_path(get_executable_dir(), "resources/web"),
+                "setup should replace a web_dir without UI by the bundled UI") && ok;
+
+    plan.host = "127.0.0.1\nnmap_path=/tmp/evil";
+    const SetupResult injected = apply_setup_plan(plan, conf_path, logger);
+    ok = expect(!injected.ok, "setup should refuse a host with a line break") && ok;
+    ok = expect(load_persisted_config(conf_path).nmap_path.empty(),
+                "a refused setup must not inject nmap_path into conf.ini") && ok;
+
+    const std::string next_to_binary = join_path(get_executable_dir(), "conf.ini");
+    ok = expect(setup_default_web_dir(next_to_binary) == make_default_persisted_config().web_dir,
+                "setup next to the binary should keep the relative default web_dir") && ok;
     return ok;
 }
 } // namespace
@@ -774,6 +857,9 @@ int main()
             server_thread.join();
         }
     }
+
+    all_ok = test_browser_setup_tls_and_web_dir(conf_path, logger) && all_ok;
+    all_ok = test_setup_host_validation() && all_ok;
 
     if (!db_path.empty())
         std::remove(db_path.c_str());

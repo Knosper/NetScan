@@ -125,6 +125,40 @@ int main()
         all_ok = expect(host_service.get_host_detail("192.168.1.99") == nullptr,
                         "missing hosts should still return null") &&
                  all_ok;
+
+        HostMetaPatch full;
+        full.has_display_name = true;
+        full.display_name = "Printer";
+        full.has_role = true;
+        full.role = "peripheral";
+        full.has_tags = true;
+        full.tags = "office";
+        all_ok = expect(host_service.update_host_meta(host_ip, full),
+                        "full meta update should succeed") &&
+                 all_ok;
+
+        HostMetaPatch tags_only;
+        tags_only.has_tags = true;
+        tags_only.tags = "office,floor2";
+        all_ok = expect(host_service.update_host_meta(host_ip, tags_only),
+                        "tags-only meta update should succeed") &&
+                 all_ok;
+
+        std::unique_ptr<HostDetail> meta_detail = host_service.get_host_detail(host_ip);
+        all_ok = expect(meta_detail != nullptr, "host detail should load after meta update") &&
+                 all_ok;
+        if (meta_detail)
+        {
+            all_ok = expect(meta_detail->meta.tags == "office,floor2",
+                            "tags-only update should replace tags") &&
+                     all_ok;
+            all_ok = expect(meta_detail->meta.display_name == "Printer",
+                            "tags-only update should keep display_name") &&
+                     all_ok;
+            all_ok = expect(meta_detail->meta.role == "peripheral",
+                            "tags-only update should keep role") &&
+                     all_ok;
+        }
     }
 
     if (!db_path.empty())

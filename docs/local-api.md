@@ -221,7 +221,7 @@ Success `202 Accepted`:
 { "status": "queued", "scan": { "id": 12, "state": "queued" } }
 ```
 
-Failures: `400` bad request, `403` restricted key target outside allowlist, `409` concurrent scan for same target, `429` cooldown active, `500` internal error, `503` nmap unavailable.
+Failures: `400` bad request, `403` restricted key target outside allowlist, `409` concurrent scan for the same or an overlapping target (e.g. `10.0.0.0/24` while `10.0.0.5` runs), `429` cooldown active, `500` internal error, `503` nmap unavailable.
 
 Note: `scripts/scan_start_fuzz.py` can exercise this endpoint with payload files.
 
@@ -289,7 +289,7 @@ Failures: `400`, `500`.
 
 ### `DELETE /api/scans/:id`
 
-Soft-deletes a completed scan.
+Soft-deletes a completed scan. Soft-deleted scans are removed for good after 7 days; independently, only the newest 1000 finished scans are kept. Never removed by the limit: queued and running scans, and the newest completed scan per target, scan mode and port list (the baseline for the next diff).
 
 - `200 OK` — `{ "status": "ok", "deletedScanId": 12 }`
 - `400` invalid id, `404` not found, `409` not deletable, `500` delete failure
@@ -308,8 +308,10 @@ All fields optional; only provided fields are updated.
 { "displayName": "My Printer", "role": "printer", "tags": "internal,managed" }
 ```
 
-- `200 OK` — updated meta object
-- `400` validation, `404` host not found
+`tags` may also be an array of strings. Meta is stored per IP, also for IPs without a scanned host.
+
+- `200 OK` — `{ "status": "ok" }`
+- `400` invalid IP or body not a JSON object, `413` body too large
 
 ### `DELETE /api/hosts/:ip/meta/:field`
 

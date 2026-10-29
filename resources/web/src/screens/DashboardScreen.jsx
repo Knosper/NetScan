@@ -449,7 +449,6 @@ export function DashboardScreen({
   } = useScanContext();
   const { hosts } = useHostContext();
   const [showAllScans, setShowAllScans] = React.useState(false);
-  const changes = dashboard.changes || dashboard.changeSummary || {};
   const portsByHost = Array.isArray(dashboard.ports)
     ? dashboard.ports.reduce((acc, entry) => {
         const hostIp = entry?.host;

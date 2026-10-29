@@ -35,6 +35,10 @@ struct ParsedCidr
 
 bool try_parse_ip_or_cidr(const std::string& raw, ParsedCidr& out);
 
+// True when two scan targets share at least one address (one CIDR contains the
+// other). Targets that are not IP/CIDR literals only overlap when equal.
+bool scan_targets_overlap(const std::string& a, const std::string& b);
+
 std::string canonicalize_target(const std::string& target);
 
 bool is_user_target_allowed(const std::string& target,

@@ -371,7 +371,7 @@ export function PresenceScreen({
                 {!presenceLoading && !presenceTrackers.length ? (
                     <StateNotice kind="empty" message="no presence trackers" compact />
                 ) : null}
-                {!!presenceTrackers.length ? (
+                {presenceTrackers.length ? (
                     <ListRegion className="presence-table-region">
                         <ListHeaderRow className="table-header-row presence-header-row">
                             <span>target</span>

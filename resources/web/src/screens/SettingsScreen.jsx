@@ -15,7 +15,6 @@ import {
 
 export function SettingsScreen({
   backendUnavailable,
-  offlineMessage,
   loading,
   settings,
   setSettings,

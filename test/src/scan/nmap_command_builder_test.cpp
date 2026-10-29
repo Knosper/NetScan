@@ -1,4 +1,5 @@
 #include "scan/nmap_command_builder.hpp"
+#include "scan/port_spec_validator.hpp"
 #include "scan/scan_chunk_planner.hpp"
 
 #include <cstdlib>
@@ -325,6 +326,22 @@ int main()
         all_ok = expect_single_request(plan_scan_chunks(request), "fd00::/112",
                                        "IPv6 target should stay on single scan path") &&
                  all_ok;
+    }
+
+    {
+        const PortSpecValidation full_range = validate_port_spec("1-65535");
+        all_ok = expect(!full_range.ok, "full port range should exceed the 128 port limit") && all_ok;
+
+        const PortSpecValidation many_tokens = validate_port_spec("1-100,200-300");
+        all_ok = expect(!many_tokens.ok, "port limit should apply across tokens") && all_ok;
+
+        const PortSpecValidation at_limit = validate_port_spec("1-128, 22");
+        all_ok = expect(at_limit.ok && at_limit.validated_spec == "1-128,22",
+                        "128 unique ports with duplicates should be accepted") &&
+                 all_ok;
+
+        const PortSpecValidation over_limit = validate_port_spec("1-128,129");
+        all_ok = expect(!over_limit.ok, "129 unique ports should be rejected") && all_ok;
     }
 
     return finish_test("nmap_command_builder_test", all_ok);

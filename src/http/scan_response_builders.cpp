@@ -179,7 +179,8 @@ bool apply_start_async_common_error(const IScanStarter::StartAsyncResult& result
         return true;
     case Status::Conflict:
         set_json_error(res, JsonError{http_status::CONFLICT, "conflict",
-                                      "a scan is already running"});
+                                      result.error_message.empty() ? "a scan is already running"
+                                                                   : result.error_message});
         return true;
     case Status::DependencyMissing:
         set_json_error(res, JsonError{http_status::SERVICE_UNAVAILABLE, "dependency_missing",

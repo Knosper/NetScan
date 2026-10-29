@@ -142,7 +142,7 @@ static void handle_scan_start_request(const httplib::Request& req, httplib::Resp
         res, ApiRequestContext{"POST /api/scan/start", ctx.logger},
         [&req, &res, &ctx]()
         {
-            if (!validate_json_post_request(req, res))
+            if (reject_if_body_too_large(req, res))
                 return;
             ScanRequest request;
             if (!parse_scan_start_request(req, res, request))

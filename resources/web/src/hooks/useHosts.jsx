@@ -66,14 +66,52 @@ function applyHostsResult(payload, cache, setters)
     setters.setHostPage(page);
     setters.setHostTotalPages(totalPages);
     if (hasHostResultChange(cache.hosts.current, nextHosts)) {
-        cache.requests.current.forEach(controller => controller.abort());
-        cache.requests.current.clear();
+        abortAll(cache.requests.current);
+        abortAll(cache.scanRequests.current);
         setters.setHostDetailLoading({});
         setters.setHostDetails({});
+        setters.setHostScanDetailLoading({});
         setters.setHostScanDetails({});
     }
     cache.hosts.current = nextHosts;
     setters.setHosts(nextHosts);
+}
+
+function abortAll(requests) {
+    requests.forEach(controller => controller.abort());
+    requests.clear();
+}
+
+// Loads one detail entry into a keyed cache. A host list change aborts the request
+// (abortAll), so a late response cannot write into the freshly cleared cache.
+async function fetchCachedDetail(requests, key, url, label, { setLoading, setDetails, setBanner, markBackendUnavailable, clearBackendUnavailable }) {
+    if (requests.has(key)) return;
+
+    const controller = new AbortController();
+    const isCurrent = () => requests.get(key) === controller;
+    requests.set(key, controller);
+
+    setLoading(previous => ({ ...previous, [key]: true }));
+    try {
+        const response = await fetchWithTimeout(url, { signal: controller.signal });
+        if (!isCurrent()) return;
+        if (!response.ok) {
+            setBanner("hosts", buildBanner("danger", `${label} failed ${response.status}`), BANNER_AUTO_HIDE_MS);
+            return;
+        }
+
+        clearBackendUnavailable();
+        const payload = await response.json();
+        if (isCurrent())
+            setDetails(previous => ({ ...previous, [key]: payload }));
+    } catch (error) {
+        if (isCurrent() && !isAbortError(error)) markBackendUnavailable();
+    } finally {
+        if (isCurrent()) {
+            requests.delete(key);
+            setLoading(previous => ({ ...previous, [key]: false }));
+        }
+    }
 }
 
 function useHostsState()
@@ -132,10 +170,8 @@ function useHostsActions(state, app)
         setHostDetailLoading,
         hostScanDetails,
         setHostScanDetails,
-        hostScanDetailLoading,
         setHostScanDetailLoading,
         setExpandedHosts,
-        hostPage,
         setHostPage,
         hostTotalPages,
         setHostTotalPages,
@@ -145,12 +181,13 @@ function useHostsActions(state, app)
     const hostsRequestRef = useRef(null);
     const hostSnapshotRef = useRef([]);
     const detailRequestsRef = useRef(new Map());
+    const scanDetailRequestsRef = useRef(new Map());
 
     const loadHosts = useCallback(async (options = {}) => {
         const { controller, abortFromCaller } = prepareController(hostsRequestRef, options.signal);
         const merged = { q: hostSearch, openPortsOnly: false, limit: hostPageSize, offset: 0, ...options };
-        const setters = { setHosts, setHostDetails, setHostDetailLoading, setHostScanDetails, setHostPage, setHostTotalPages };
-        const cache = { hosts: hostSnapshotRef, requests: detailRequestsRef, hostPageSize };
+        const setters = { setHosts, setHostDetails, setHostDetailLoading, setHostScanDetails, setHostScanDetailLoading, setHostPage, setHostTotalPages };
+        const cache = { hosts: hostSnapshotRef, requests: detailRequestsRef, scanRequests: scanDetailRequestsRef, hostPageSize };
         setLoading(true);
         try {
             const result = await executeFetch(buildHostsUrl(merged), controller, hostsRequestRef);
@@ -172,13 +209,13 @@ function useHostsActions(state, app)
                 setLoading(false);
             }
         }
-    }, [hostSearch, hostPageSize, setLoading, setBanner, markBackendUnavailable, clearBackendUnavailable, setHosts, setHostDetails, setHostDetailLoading, setHostScanDetails, setHostPage, setHostTotalPages]);
+    }, [hostSearch, hostPageSize, setLoading, setBanner, markBackendUnavailable, clearBackendUnavailable, setHosts, setHostDetails, setHostDetailLoading, setHostScanDetails, setHostScanDetailLoading, setHostPage, setHostTotalPages]);
 
     useEffect(() => () => {
         hostsRequestRef.current?.abort();
         hostsRequestRef.current = null;
-        detailRequestsRef.current.forEach(controller => controller.abort());
-        detailRequestsRef.current.clear();
+        abortAll(detailRequestsRef.current);
+        abortAll(scanDetailRequestsRef.current);
     }, []);
 
     const goToPage = useCallback((targetPage, extras = {}) => {
@@ -187,56 +224,17 @@ function useHostsActions(state, app)
         return loadHosts({ ...extras, offset, limit: hostPageSize });
     }, [loadHosts, hostTotalPages, hostPageSize]);
 
-    const loadHostDetail = useCallback(async (ip) => {
-        if (!ip || hostDetails[ip] || detailRequestsRef.current.has(ip)) return;
-
-        const controller = new AbortController();
-        const isCurrent = () => detailRequestsRef.current.get(ip) === controller;
-        detailRequestsRef.current.set(ip, controller);
-
-        setHostDetailLoading(previous => ({ ...previous, [ip]: true }));
-        try {
-            const response = await fetchWithTimeout(`/api/hosts/${encodeURIComponent(ip)}`, { signal: controller.signal });
-            if (!isCurrent()) return;
-            if (!response.ok) {
-                setBanner("hosts", buildBanner("danger", `host ${ip} failed ${response.status}`), BANNER_AUTO_HIDE_MS);
-                return;
-            }
-
-            clearBackendUnavailable();
-            const payload = await response.json();
-            if (isCurrent())
-                setHostDetails(previous => ({ ...previous, [ip]: payload }));
-        } catch (error) {
-            if (isCurrent() && !isAbortError(error)) markBackendUnavailable();
-        } finally {
-            if (isCurrent()) {
-                detailRequestsRef.current.delete(ip);
-                setHostDetailLoading(previous => ({ ...previous, [ip]: false }));
-            }
-        }
+    const loadHostDetail = useCallback((ip) => {
+        if (!ip || hostDetails[ip]) return;
+        return fetchCachedDetail(detailRequestsRef.current, ip, `/api/hosts/${encodeURIComponent(ip)}`, `host ${ip}`,
+            { setLoading: setHostDetailLoading, setDetails: setHostDetails, setBanner, markBackendUnavailable, clearBackendUnavailable });
     }, [hostDetails, setHostDetailLoading, setBanner, markBackendUnavailable, clearBackendUnavailable, setHostDetails]);
 
-    const loadHostScanDetail = useCallback(async (scanId) => {
-        if (!scanId || hostScanDetails[scanId] || hostScanDetailLoading[scanId]) return;
-
-        setHostScanDetailLoading(previous => ({ ...previous, [scanId]: true }));
-        try {
-            const response = await fetchWithTimeout(`/api/scans/${scanId}`);
-            if (!response.ok) {
-                setBanner("hosts", buildBanner("danger", `scan ${scanId} failed ${response.status}`), BANNER_AUTO_HIDE_MS);
-                return;
-            }
-
-            clearBackendUnavailable();
-            const payload = await response.json();
-            setHostScanDetails(previous => ({ ...previous, [scanId]: payload }));
-        } catch (_) {
-            markBackendUnavailable();
-        } finally {
-            setHostScanDetailLoading(previous => ({ ...previous, [scanId]: false }));
-        }
-    }, [hostScanDetails, hostScanDetailLoading, setHostScanDetailLoading, setBanner, markBackendUnavailable, clearBackendUnavailable, setHostScanDetails]);
+    const loadHostScanDetail = useCallback((scanId) => {
+        if (!scanId || hostScanDetails[scanId]) return;
+        return fetchCachedDetail(scanDetailRequestsRef.current, scanId, `/api/scans/${scanId}`, `scan ${scanId}`,
+            { setLoading: setHostScanDetailLoading, setDetails: setHostScanDetails, setBanner, markBackendUnavailable, clearBackendUnavailable });
+    }, [hostScanDetails, setHostScanDetailLoading, setBanner, markBackendUnavailable, clearBackendUnavailable, setHostScanDetails]);
 
     const toggleHostExpanded = useCallback((ip) => {
         setExpandedHosts(previous => previous.includes(ip)

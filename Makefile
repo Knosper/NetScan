@@ -7,7 +7,8 @@ WINDRES = windres
 UNAME_S := $(shell uname -s)
 .DEFAULT_GOAL := all
 
-CPPFLAGS = -I. -Iinclude -Ithird_party -Ithird_party/sqlite3 -Ithird_party/tinyxml2 -DCPPHTTPLIB_OPENSSL_SUPPORT
+# build/gen comes before third_party so the split cpp-httplib header wins (see HTTPLIB_* below)
+CPPFLAGS = -I. -Iinclude -Ibuild/gen -Ithird_party -Ithird_party/sqlite3 -Ithird_party/tinyxml2 -DCPPHTTPLIB_OPENSSL_SUPPORT
 COMMON_WARNINGS = -Wall -Wextra -Werror
 DEPFLAGS = -MMD -MP
 WINDOWS_DEFINES = -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
@@ -139,6 +140,14 @@ TINYXML2_DIR = third_party/tinyxml2
 TINYXML2_SRC = $(TINYXML2_DIR)/tinyxml2.cpp
 TINYXML2_OBJ = build/third_party/tinyxml2/tinyxml2.o
 
+# cpp-httplib is header-only, so every file including it compiled the whole
+# implementation again (~10 s each). Split it once into declarations and a
+# single .cc, the same way upstream's split.py does.
+HTTPLIB_SRC = third_party/httplib/httplib.h
+HTTPLIB_GEN_H = build/gen/httplib/httplib.h
+HTTPLIB_GEN_CC = build/gen/httplib/httplib.cc
+HTTPLIB_OBJ = build/third_party/httplib/httplib.o
+
 OBJ = $(SRC:src/%.cpp=build/%.o)
 
 LAUNCHER_SRC = src/app/windows_launcher.cpp
@@ -174,11 +183,19 @@ endif
 
 SRC += $(NMAP_RUNNER_PLATFORM_SRC)
 
+# Everything except main(): linked into the server and, via libnetscan.a, into the tests
+NETSCAN_LIB = build/libnetscan.a
+NETSCAN_LIB_OBJ = $(filter-out build/main.o,$(OBJ)) $(SQLITE_OBJ) $(TINYXML2_OBJ) $(HTTPLIB_OBJ)
+
 include mk/tests.mk
 
 all: $(FRONTEND_STAMP) $(TARGET) $(CONF_FILE)
 backend: $(TARGET) $(CONF_FILE)
 frontend: $(FRONTEND_STAMP)
+
+# ESLint + Vitest for resources/web (no build needed)
+frontend-check: $(FRONTEND_INSTALL_STAMP)
+	cd $(FRONTEND_DIR) && npm run lint && npm test
 
 $(FRONTEND_INSTALL_STAMP): $(FRONTEND_DEPS)
 	mkdir -p $(dir $@)
@@ -190,8 +207,13 @@ $(FRONTEND_STAMP): $(FRONTEND_INSTALL_STAMP) $(FRONTEND_SOURCES)
 	cd $(FRONTEND_DIR) && npm run build
 	touch $@
 
-$(TARGET): $(OBJ) $(SQLITE_OBJ) $(TINYXML2_OBJ) $(RES_OBJ)
-	$(CXX) $(CXXFLAGS) $(OBJ) $(SQLITE_OBJ) $(TINYXML2_OBJ) $(RES_OBJ) -o $(TARGET) $(LDFLAGS) $(LDLIBS)
+$(TARGET): $(OBJ) $(SQLITE_OBJ) $(TINYXML2_OBJ) $(HTTPLIB_OBJ) $(RES_OBJ)
+	$(CXX) $(CXXFLAGS) $(OBJ) $(SQLITE_OBJ) $(TINYXML2_OBJ) $(HTTPLIB_OBJ) $(RES_OBJ) -o $(TARGET) $(LDFLAGS) $(LDLIBS)
+
+$(NETSCAN_LIB): $(NETSCAN_LIB_OBJ)
+	mkdir -p $(dir $@)
+	rm -f $@
+	$(AR) rcs $@ $^
 
 # Canonical default conf.ini content — single source of truth.
 # Used both for generating a local dev conf.ini and for shipping in release packages.
@@ -216,11 +238,13 @@ $(CONF_FILE):
 		printf '%s\n' "$$DEFAULT_CONF_CONTENT" > $(CONF_FILE); \
 	fi
 
-build/%.o: src/%.cpp
+# Order-only: on a clean build no file may compile against the header-only
+# httplib from third_party before the split header exists.
+build/%.o: src/%.cpp | $(HTTPLIB_GEN_H)
 	mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-build/test/src/%.o: test/src/%.cpp
+build/test/src/%.o: test/src/%.cpp | $(HTTPLIB_GEN_H)
 	mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(TEST_CXXFLAGS) -c $< -o $@
 
@@ -231,6 +255,18 @@ $(SQLITE_OBJ): $(SQLITE_SRC)
 $(TINYXML2_OBJ): $(TINYXML2_SRC)
 	mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Wno-unused-parameter -c $< -o $@
+
+$(HTTPLIB_GEN_H): $(HTTPLIB_SRC) mk/split_httplib.awk
+	mkdir -p $(dir $@)
+	awk -v h=$@.tmp -v cc=$(HTTPLIB_GEN_CC).tmp -f mk/split_httplib.awk $(HTTPLIB_SRC)
+	mv $(HTTPLIB_GEN_CC).tmp $(HTTPLIB_GEN_CC)
+	mv $@.tmp $@
+
+$(HTTPLIB_GEN_CC): $(HTTPLIB_GEN_H)
+
+$(HTTPLIB_OBJ): $(HTTPLIB_GEN_CC)
+	mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 build/appres.o: $(RES)
 	mkdir -p build
@@ -383,6 +419,6 @@ print:
 	@echo RES_OBJ=$(RES_OBJ)
 	@echo SQLITE_OBJ=$(SQLITE_OBJ)
 
--include $(OBJ:.o=.d) $(SQLITE_DEP) $(TINYXML2_OBJ:.o=.d) $(TEST_DEPS)
+-include $(OBJ:.o=.d) $(SQLITE_DEP) $(TINYXML2_OBJ:.o=.d) $(HTTPLIB_OBJ:.o=.d) $(TEST_DEPS)
 
-.PHONY: all backend frontend clean fclean re print release release-linux release-windows release-api release-ui test time-all time-backend time-test-build time-test time-full
+.PHONY: all backend frontend frontend-check clean fclean re print release release-linux release-windows release-api release-ui test time-all time-backend time-test-build time-test time-full

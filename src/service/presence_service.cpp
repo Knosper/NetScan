@@ -332,8 +332,18 @@ void PresenceService::maybe_start_initial_scan(const PresenceTracker& tracker,
     {
         logger_.info("presence_service: queued initial minimal scan for target '" + target +
                      "' from tracker " + std::to_string(tracker.id));
+        return;
     }
-    else if (start.status != IScanStarter::StartAsyncStatus::Conflict)
+
+    // Busy (an overlapping scan runs, or the parallel scan limit is reached) is
+    // temporary: forget the attempt so the next "up" check tries again.
+    if (start.status == IScanStarter::StartAsyncStatus::Conflict ||
+        start.status == IScanStarter::StartAsyncStatus::PolicyViolation)
+    {
+        std::lock_guard<std::mutex> lock(auto_scan_mutex_);
+        auto_scan_attempted_targets_.erase(target);
+    }
+    if (start.status != IScanStarter::StartAsyncStatus::Conflict)
     {
         logger_.warn("presence_service: failed to queue initial minimal scan for target '" +
                      target + "': " + start.error_message);

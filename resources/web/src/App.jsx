@@ -78,7 +78,6 @@ function useAppOrchestration()
         loadScanDiff,
         updateDiffAcknowledgement,
         loadScanTopology,
-        loadScanTopologies,
         handleAbortScan
     } = useScans(setLoading);
 

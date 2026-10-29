@@ -1,26 +1,18 @@
 #include "scan/nmap.hpp"
 
 #ifdef _WIN32
-#include <cstdio>
+#include "util/windows_executable_path.hpp"
 
-static const int NMAP_CHECK_BUFFER_SIZE = 256;
+#include <string>
 
+// Uses the same lookup as the scan runner; where.exe would also accept an nmap.exe planted in
+// the current directory.
 NmapCheckResult check_nmap()
 {
-    FILE* pipe = _popen("where nmap 2>nul", "r");
-
-    if (pipe == nullptr)
-        return {HealthCheckStatus::Error, "failed to open pipe for availability check"};
-
-    char buf[NMAP_CHECK_BUFFER_SIZE];
-    bool found = (std::fgets(buf, sizeof(buf), pipe) != nullptr);
-    int rc = _pclose(pipe);
-
-    if (rc == -1)
-        return {HealthCheckStatus::Error, "_pclose failed"};
-
-    // where.exe exits 0 when found, 1 when not found
-    if (!found || rc != 0)
+    std::wstring resolved;
+    std::string error;
+    if (!util::resolve_windows_executable("nmap", util::current_windows_search_path(), resolved,
+                                          error))
         return {HealthCheckStatus::Missing, ""};
 
     return {HealthCheckStatus::Ok, ""};

@@ -2,6 +2,7 @@
 #include "scan/target_validation.hpp"
 #include "util/logger.hpp"
 #include "util/windows_argument_quote.hpp"
+#include "util/windows_executable_path.hpp"
 
 #include "httplib/httplib.h"
 
@@ -161,8 +162,21 @@ STARTUPINFOW hidden_startup_info()
     return si;
 }
 
+// ping is always taken from the system directory: a bare "ping" would let CreateProcess pick up
+// a ping.exe from the application or current directory first.
 int execute_ping_command(const std::vector<std::string>& args, int timeout_ms, Logger* logger)
 {
+    std::wstring application;
+    std::string resolve_error;
+    if (args.empty() ||
+        !util::resolve_windows_executable(args[0], util::windows_system_directory(), application,
+                                          resolve_error))
+    {
+        if (logger)
+            logger->warn("presence ping could not be started: " + resolve_error);
+        return -1;
+    }
+
     std::wstring cmdline = util::build_windows_command_line(args);
     std::vector<wchar_t> command_buffer(cmdline.begin(), cmdline.end());
     command_buffer.push_back(L'\0');
@@ -171,7 +185,7 @@ int execute_ping_command(const std::vector<std::string>& args, int timeout_ms, L
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
 
-    if (!CreateProcessW(nullptr, &command_buffer[0], nullptr, nullptr, FALSE,
+    if (!CreateProcessW(application.c_str(), &command_buffer[0], nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
         return -1;
 

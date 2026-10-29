@@ -3,6 +3,7 @@
 #include "scan/nmap_runner_internal.hpp"
 #include "util/logger.hpp"
 #include "util/windows_argument_quote.hpp"
+#include "util/windows_executable_path.hpp"
 
 #include <chrono>
 #include <iterator>
@@ -178,6 +179,12 @@ bool force_terminate_nmap_process(const NmapProcessHandle& handle, std::string* 
     return terminate_nmap_process_impl(handle, error);
 }
 
+// Windows needs no reaping by the runner thread, so waiting for the exit is safe here.
+bool kill_nmap_process_without_wait(const NmapProcessHandle& handle, std::string* error)
+{
+    return terminate_nmap_process_impl(handle, error);
+}
+
 namespace
 {
 SECURITY_ATTRIBUTES inheritable_security_attributes()
@@ -260,11 +267,37 @@ bool create_stderr_file(HANDLE& stderr_handle, std::wstring& stderr_path, std::s
     return true;
 }
 
-std::vector<wchar_t> build_mutable_command_line(const ProcessSpec& process, std::string& error)
+bool open_null_input(HANDLE& input_handle, std::string& error)
+{
+    SECURITY_ATTRIBUTES security_attributes = inheritable_security_attributes();
+    input_handle = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               &security_attributes, OPEN_EXISTING, 0, nullptr);
+    if (input_handle == INVALID_HANDLE_VALUE)
+    {
+        input_handle = nullptr;
+        error = format_windows_error("failed to open NUL for nmap stdin", GetLastError());
+        return false;
+    }
+    return true;
+}
+
+std::wstring parent_directory(const std::wstring& path)
+{
+    const std::wstring::size_type separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos)
+        return std::wstring();
+    // Keep the separator for a drive root ("C:\") so it does not turn into "C:".
+    if (separator == 2 && path[1] == L':')
+        return path.substr(0, 3);
+    return path.substr(0, separator);
+}
+
+std::vector<wchar_t> build_mutable_command_line(const std::wstring& application,
+                                                const ProcessSpec& process, std::string& error)
 {
     std::vector<std::string> all_args;
     all_args.reserve(1 + process.args.size());
-    all_args.push_back(process.executable);
+    all_args.push_back(wide_to_utf8(application));
     all_args.insert(all_args.end(), process.args.begin(), process.args.end());
     std::wstring command_line = util::build_windows_command_line(all_args);
     if (command_line.empty())
@@ -278,26 +311,89 @@ std::vector<wchar_t> build_mutable_command_line(const ProcessSpec& process, std:
     return mutable_command_line;
 }
 
-STARTUPINFOW make_startup_info(HANDLE stdout_write_pipe, HANDLE stderr_handle)
+struct ChildStdHandles
 {
-    STARTUPINFOW startup_info;
-    ZeroMemory(&startup_info, sizeof(startup_info));
-    startup_info.cb = sizeof(startup_info);
-    startup_info.dwFlags = STARTF_USESTDHANDLES;
-    startup_info.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    startup_info.hStdOutput = stdout_write_pipe;
-    startup_info.hStdError = stderr_handle;
-    return startup_info;
-}
+    HANDLE input = nullptr;
+    HANDLE output = nullptr;
+    HANDLE error = nullptr;
+};
 
-bool create_windows_process(std::vector<wchar_t>& command_line, HANDLE stdout_write_pipe,
-                            HANDLE stderr_handle, PROCESS_INFORMATION& process_info,
+// Owns a PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the child inherits only its own std handles,
+// not the pipes of other scans that run in parallel or any other inheritable handle.
+class InheritedHandleList
+{
+public:
+    InheritedHandleList() = default;
+    InheritedHandleList(const InheritedHandleList&) = delete;
+    InheritedHandleList& operator=(const InheritedHandleList&) = delete;
+    ~InheritedHandleList()
+    {
+        if (initialized_)
+            DeleteProcThreadAttributeList(list());
+    }
+
+    bool initialize(const ChildStdHandles& handles, std::string& error)
+    {
+        handles_[0] = handles.input;
+        handles_[1] = handles.output;
+        handles_[2] = handles.error;
+
+        SIZE_T size = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+        buffer_.resize(size);
+        if (size == 0 || InitializeProcThreadAttributeList(list(), 1, 0, &size) == 0)
+        {
+            error = format_windows_error("failed to initialize process attributes", GetLastError());
+            return false;
+        }
+        initialized_ = true;
+
+        if (UpdateProcThreadAttribute(list(), 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles_,
+                                      sizeof(handles_), nullptr, nullptr) == 0)
+        {
+            error = format_windows_error("failed to restrict inherited handles", GetLastError());
+            return false;
+        }
+        return true;
+    }
+
+    LPPROC_THREAD_ATTRIBUTE_LIST list()
+    {
+        return reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(buffer_.data());
+    }
+
+private:
+    std::vector<unsigned char> buffer_;
+    HANDLE handles_[3] = {nullptr, nullptr, nullptr};
+    bool initialized_ = false;
+};
+
+// Started suspended so the caller can put the process into its job before nmap runs.
+// The working directory is nmap's own directory, so the child's DLL search never falls back to
+// whatever directory NetScan was started from.
+bool create_windows_process(const std::wstring& application, std::vector<wchar_t>& command_line,
+                            const ChildStdHandles& handles, PROCESS_INFORMATION& process_info,
                             std::string& error)
 {
-    STARTUPINFOW startup_info = make_startup_info(stdout_write_pipe, stderr_handle);
+    InheritedHandleList inherited_handles;
+    if (!inherited_handles.initialize(handles, error))
+        return false;
+
+    STARTUPINFOEXW startup_info;
+    ZeroMemory(&startup_info, sizeof(startup_info));
+    startup_info.StartupInfo.cb = sizeof(startup_info);
+    startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup_info.StartupInfo.hStdInput = handles.input;
+    startup_info.StartupInfo.hStdOutput = handles.output;
+    startup_info.StartupInfo.hStdError = handles.error;
+    startup_info.lpAttributeList = inherited_handles.list();
+
+    const std::wstring working_directory = parent_directory(application);
     ZeroMemory(&process_info, sizeof(process_info));
-    if (CreateProcessW(nullptr, &command_line[0], nullptr, nullptr, TRUE, 0, nullptr,
-                       nullptr, &startup_info, &process_info) == 0)
+    if (CreateProcessW(application.c_str(), &command_line[0], nullptr, nullptr, TRUE,
+                       EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, nullptr,
+                       working_directory.empty() ? nullptr : working_directory.c_str(),
+                       &startup_info.StartupInfo, &process_info) == 0)
     {
         error = format_windows_error("failed to start nmap process", GetLastError());
         ZeroMemory(&process_info, sizeof(process_info));
@@ -486,21 +582,41 @@ NmapRunResult run_nmap_process(const ProcessSpec& process, Logger* logger,
     if (!create_stderr_file(stderr_handle.h, stderr_file.path, error))
         return {false, -1, "", "", error};
 
-    std::vector<wchar_t> command_line = build_mutable_command_line(process, error);
+    ScopedHandle stdin_handle;
+    if (!open_null_input(stdin_handle.h, error))
+        return {false, -1, "", "", error};
+
+    std::wstring application;
+    if (!util::resolve_windows_executable(process.executable,
+                                          util::current_windows_search_path(), application, error))
+        return {false, -1, "", "", error};
+
+    std::vector<wchar_t> command_line = build_mutable_command_line(application, process, error);
     if (command_line.empty())
         return {false, -1, "", "", error};
 
+    ChildStdHandles child_handles;
+    child_handles.input = stdin_handle.h;
+    child_handles.output = stdout_write_pipe.h;
+    child_handles.error = stderr_handle.h;
     PROCESS_INFORMATION process_info;
-    if (!create_windows_process(command_line, stdout_write_pipe.h, stderr_handle.h,
-                                process_info, error))
+    if (!create_windows_process(application, command_line, child_handles, process_info, error))
         return {false, -1, "", "", error};
 
     HANDLE job = nullptr;
     std::string job_error;
     if (!create_kill_on_close_job(process_info.hProcess, job, job_error))
         return abort_spawned_process(process_info, job_error);
+    if (ResumeThread(process_info.hThread) == static_cast<DWORD>(-1))
+    {
+        const std::string resume_error =
+            format_windows_error("failed to resume nmap process", GetLastError());
+        CloseHandle(job);
+        return abort_spawned_process(process_info, resume_error);
+    }
 
     stdout_write_pipe = ScopedHandle{};
+    stdin_handle = ScopedHandle{};
     if (logger)
         logger->info("nmap process started (pid " +
                      std::to_string(static_cast<unsigned long>(GetProcessId(process_info.hProcess))) +

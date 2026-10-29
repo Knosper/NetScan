@@ -257,20 +257,34 @@ static nlohmann::json parse_host_meta_body(const httplib::Request& req)
     }
 }
 
-static void apply_host_meta_patch(const nlohmann::json& body, HostMeta& meta)
+static HostMetaPatch parse_host_meta_patch(const nlohmann::json& body)
 {
+    HostMetaPatch patch;
     if (body.contains("displayName") && body["displayName"].is_string())
-        meta.display_name = body["displayName"].get<std::string>();
+    {
+        patch.has_display_name = true;
+        patch.display_name = body["displayName"].get<std::string>();
+    }
     if (body.contains("role") && body["role"].is_string())
-        meta.role = body["role"].get<std::string>();
+    {
+        patch.has_role = true;
+        patch.role = body["role"].get<std::string>();
+    }
     if (!body.contains("tags"))
-        return;
+        return patch;
 
     const auto& tags = body["tags"];
     if (tags.is_string())
-        meta.tags = tags.get<std::string>();
+    {
+        patch.has_tags = true;
+        patch.tags = tags.get<std::string>();
+    }
     else if (tags.is_array())
-        meta.tags = tags_array_to_string(tags);
+    {
+        patch.has_tags = true;
+        patch.tags = tags_array_to_string(tags);
+    }
+    return patch;
 }
 
 static void handle_patch_host_meta(const httplib::Request& req, httplib::Response& res,
@@ -298,9 +312,12 @@ static void handle_patch_host_meta(const httplib::Request& req, httplib::Respons
                 return;
             }
 
-            HostMeta meta;
-            apply_host_meta_patch(body, meta);
-            service.update_host_meta(host_ip, meta);
+            if (!service.update_host_meta(host_ip, parse_host_meta_patch(body)))
+            {
+                set_json_error(res, JsonError{http_status::INTERNAL_SERVER_ERROR, "internal_error",
+                                              "failed to save host meta"});
+                return;
+            }
             set_json_response(res, http_status::OK, "{\"status\":\"ok\"}");
         });
 }
@@ -335,7 +352,13 @@ static void handle_delete_host_meta_field(const httplib::Request& req, httplib::
                               return;
                           }
 
-                          service.clear_host_meta_field(host_ip, field);
+                          if (!service.clear_host_meta_field(host_ip, field))
+                          {
+                              set_json_error(res, JsonError{http_status::INTERNAL_SERVER_ERROR,
+                                                            "internal_error",
+                                                            "failed to clear host meta field"});
+                              return;
+                          }
                           set_json_response(res, http_status::OK, "{\"status\":\"ok\"}");
                       });
 }

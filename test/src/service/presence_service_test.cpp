@@ -98,10 +98,13 @@ public:
     StartAsyncResult start_async(const ScanRequest& request) override
     {
         requests.push_back(request);
+        if (status != StartAsyncStatus::Accepted)
+            return {status, -1, "busy"};
         return {StartAsyncStatus::Accepted, static_cast<int>(requests.size()), ""};
     }
 
     std::vector<ScanRequest> requests;
+    StartAsyncStatus status = StartAsyncStatus::Accepted;
 };
 
 PresenceTracker make_tracker(int index)
@@ -429,6 +432,26 @@ int main()
             all_ok = expect(scan_starter.requests.size() == 1,
                             "initial scan should not repeat for the same target") && all_ok;
             auto_scan_service.delete_tracker(ping_created.tracker.id);
+        }
+
+        // A busy scanner (overlapping scan, parallel limit) must not use up the
+        // one initial scan attempt.
+        FakeScanStarter busy_starter;
+        busy_starter.status = IScanStarter::StartAsyncStatus::Conflict;
+        PresenceService busy_service(db, logger, auto_runner, &busy_starter);
+        PresenceWriteResult busy_created = busy_service.create_tracker(make_ping_tracker());
+        if (busy_created.status == PresenceStatus::Ok)
+        {
+            busy_service.run_check(busy_created.tracker.id);
+            busy_starter.status = IScanStarter::StartAsyncStatus::PolicyViolation;
+            busy_service.run_check(busy_created.tracker.id);
+            busy_starter.status = IScanStarter::StartAsyncStatus::Accepted;
+            busy_service.run_check(busy_created.tracker.id);
+            busy_service.run_check(busy_created.tracker.id);
+            all_ok = expect(busy_starter.requests.size() == 3,
+                            "initial scan should be retried after conflict or scan limit, "
+                            "then not repeat once accepted") && all_ok;
+            busy_service.delete_tracker(busy_created.tracker.id);
         }
 
         for (int i = 2; i <= 5; ++i)

@@ -330,6 +330,134 @@ bool expect_port_state_tracks_coverage(Database& db, ScanRepository& repo)
 
     return all_ok;
 }
+
+int count_rows(Database& db, const std::string& sql)
+{
+    return db.read(
+        [&sql](sqlite3* h)
+        {
+            sqlite3_stmt* stmt = nullptr;
+            int count = -1;
+            if (sqlite3_prepare_v2(h, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK &&
+                sqlite3_step(stmt) == SQLITE_ROW)
+                count = sqlite3_column_int(stmt, 0);
+            sqlite3_finalize(stmt);
+            return count;
+        });
+}
+
+int purge(Database& db, ScanRepository& repo, const std::string& deleted_before, int max_retained)
+{
+    return db.write([&](sqlite3* h) { return repo.purge_scans(h, deleted_before, max_retained); });
+}
+
+// Retention: old soft-deleted scans and finished scans beyond the limit are
+// removed with their child rows; running scans and recent deletions stay.
+bool expect_purge_removes_expired_scans(Logger& logger)
+{
+    bool all_ok = true;
+    const std::string db_path = make_temp_db_path("/tmp/netscan-scan-purge-test-XXXXXX.db");
+    Database db(db_path);
+    configure_database_runtime(db, logger);
+    init_schema(db, logger);
+    ScanRepository repo(db);
+
+    // Ask the writer: the reader connection may still report the old header value.
+    const int auto_vacuum = db.write(
+        [](sqlite3* h)
+        {
+            sqlite3_stmt* stmt = nullptr;
+            int mode = -1;
+            if (sqlite3_prepare_v2(h, "PRAGMA auto_vacuum;", -1, &stmt, nullptr) == SQLITE_OK &&
+                sqlite3_step(stmt) == SQLITE_ROW)
+                mode = sqlite3_column_int(stmt, 0);
+            sqlite3_finalize(stmt);
+            return mode;
+        });
+    all_ok = expect(auto_vacuum == 2, "new database should use incremental auto_vacuum") && all_ok;
+
+    const lsm::scan::ScanSnapshot snapshot{{{"10.2.0.1", "host", {{"tcp", 22, "open", "ssh"}}}}};
+    std::vector<int> ids;
+    for (int i = 0; i < 4; ++i)
+        ids.push_back(persist_scan(db, repo, {{"10.2.0.1", "22", false, ""},
+                                              PersistedScanState::Completed, false, snapshot}));
+    const int running_id = persist_scan(
+        db, repo, {{"10.2.0.2", "", true, ""}, PersistedScanState::Running, true, {}});
+
+    db.write([&](sqlite3* h)
+    {
+        repo.soft_delete_scan_by_id(h, ids[1], "2026-01-01 00:00:00");
+        repo.soft_delete_scan_by_id(h, ids[2], "2026-03-01 00:00:00");
+        const std::string note_sql = "INSERT INTO scan_notes(scan_id, body) VALUES (" +
+                                     std::to_string(ids[1]) + ", 'note');";
+        sqlite3_exec(h, note_sql.c_str(), nullptr, nullptr, nullptr);
+    });
+
+    all_ok = expect(purge(db, repo, "2026-02-01 00:00:00", 100) == 1,
+                    "only the scan deleted before the cutoff should be purged") && all_ok;
+    const std::string purged = std::to_string(ids[1]);
+    all_ok = expect(count_rows(db, "SELECT COUNT(*) FROM scans WHERE id=" + purged) == 0 &&
+                    count_rows(db, "SELECT COUNT(*) FROM scan_hosts WHERE scan_id=" + purged) == 0 &&
+                    count_rows(db, "SELECT COUNT(*) FROM scan_ports WHERE scan_id=" + purged) == 0 &&
+                    count_rows(db, "SELECT COUNT(*) FROM scan_port_coverage WHERE scan_id=" + purged) == 0 &&
+                    count_rows(db, "SELECT COUNT(*) FROM scan_notes WHERE scan_id=" + purged) == 0,
+                    "purged scan should lose all child rows") && all_ok;
+    all_ok = expect(count_rows(db, "SELECT COUNT(*) FROM scan_ports WHERE scan_id=" +
+                                       std::to_string(ids[0])) == 1,
+                    "kept scans should keep their child rows") && all_ok;
+
+    // Remaining finished, not deleted: ids[0], ids[3]. Keep only the newest one.
+    all_ok = expect(purge(db, repo, "2026-02-01 00:00:00", 1) == 1,
+                    "finished scans beyond the limit should be purged") && all_ok;
+    all_ok = expect(count_rows(db, "SELECT COUNT(*) FROM scans WHERE id=" + std::to_string(ids[0])) == 0 &&
+                    count_rows(db, "SELECT COUNT(*) FROM scans WHERE id=" + std::to_string(ids[3])) == 1 &&
+                    count_rows(db, "SELECT COUNT(*) FROM scans WHERE id=" + std::to_string(ids[2])) == 1 &&
+                    count_rows(db, "SELECT COUNT(*) FROM scans WHERE id=" + std::to_string(running_id)) == 1,
+                    "limit should keep the newest scan, recent deletions and running scans") && all_ok;
+
+    all_ok = expect(purge(db, repo, "2026-02-01 00:00:00", 1) == 0,
+                    "a second purge should be a no-op") && all_ok;
+    return all_ok;
+}
+
+// The count limit is global, but a rarely scanned target keeps its newest completed
+// scan (diff baseline, presence "already scanned"). Older and failed scans still go.
+bool expect_purge_keeps_latest_scan_per_series(Logger& logger)
+{
+    bool all_ok = true;
+    const std::string db_path = make_temp_db_path("/tmp/netscan-scan-purge-series-XXXXXX.db");
+    Database db(db_path);
+    configure_database_runtime(db, logger);
+    init_schema(db, logger);
+    ScanRepository repo(db);
+
+    const lsm::scan::ScanSnapshot snapshot{{{"10.3.0.1", "host", {{"tcp", 22, "open", "ssh"}}}}};
+    const int rare_old = persist_scan(db, repo, {{"10.3.0.9", "22", false, ""},
+                                                 PersistedScanState::Completed, false, snapshot});
+    const int rare_latest = persist_scan(db, repo, {{"10.3.0.9", "22", false, ""},
+                                                    PersistedScanState::Completed, false, snapshot});
+    const int rare_failed = persist_scan(db, repo, {{"10.3.0.9", "22", false, ""},
+                                                    PersistedScanState::Failed, false, {}});
+    const int other_ports = persist_scan(db, repo, {{"10.3.0.9", "80", false, ""},
+                                                    PersistedScanState::Completed, false, snapshot});
+    std::vector<int> busy;
+    for (int i = 0; i < 3; ++i)
+        busy.push_back(persist_scan(db, repo, {{"10.3.0.1", "22", false, ""},
+                                               PersistedScanState::Completed, false, snapshot}));
+
+    all_ok = expect(purge(db, repo, "2026-02-01 00:00:00", 1) == 4,
+                    "older scans of each series and failed scans should be purged") && all_ok;
+    const auto exists = [&db](int id)
+    { return count_rows(db, "SELECT COUNT(*) FROM scans WHERE id=" + std::to_string(id)) == 1; };
+    all_ok = expect(exists(rare_latest) && exists(other_ports) && exists(busy[2]),
+                    "newest completed scan of every series should survive the count limit") &&
+             all_ok;
+    all_ok = expect(!exists(rare_old) && !exists(rare_failed) && !exists(busy[0]) &&
+                        !exists(busy[1]),
+                    "superseded and failed scans beyond the limit should be purged") &&
+             all_ok;
+    return all_ok;
+}
 } // namespace
 
 int main()
@@ -511,6 +639,8 @@ int main()
     all_ok = expect_scan_port_coverage_persists(db, repo) && all_ok;
     all_ok = expect_port_state_tracks_coverage(db, repo) && all_ok;
     all_ok = expect_diff_acknowledgement_persists(db, repo) && all_ok;
+    all_ok = expect_purge_removes_expired_scans(logger) && all_ok;
+    all_ok = expect_purge_keeps_latest_scan_per_series(logger) && all_ok;
 
     return finish_test("scan_repository_test", all_ok);
 }

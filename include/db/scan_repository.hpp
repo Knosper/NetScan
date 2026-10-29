@@ -38,6 +38,13 @@ public:
 
     std::unique_ptr<PersistedScanSummary> get_scan_by_id(sqlite3* h, int scan_id);
     bool soft_delete_scan_by_id(sqlite3* h, int scan_id, const std::string& deleted_at);
+    // Hard-deletes scans (with hosts, ports, coverage and notes) that were
+    // soft-deleted before `deleted_before`, plus finished scans beyond the newest
+    // `max_retained`, except the newest completed scan per target/mode/ports.
+    // Queued and running scans are never touched.
+    // Returns the number of removed scans, or -1 on error.
+    // REQUIRES: caller wraps the call in a write transaction.
+    int purge_scans(sqlite3* h, const std::string& deleted_before, int max_retained);
     std::unique_ptr<PersistedScanSummary> get_latest_scan(sqlite3* h);
     bool scan_exists_for_target(sqlite3* h, const std::string& target);
     std::unique_ptr<PersistedScanSummary> get_last_completed_scan_for_target(

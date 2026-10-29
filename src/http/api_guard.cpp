@@ -3,12 +3,15 @@
 #include "http/responses.hpp"
 #include "http/route_utils.hpp"
 #include "util/secret_utils.hpp"
+#include "util/string_utils.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 static bool has_prefix(const std::string& s, const char* prefix)
 {
@@ -27,16 +30,138 @@ static bool is_api_route(const std::string& path)
     return path == "/api" || has_prefix(path, "/api/");
 }
 
+// Shared hardening headers of the main and the setup server; only the CSP differs.
+static void set_security_headers(httplib::Response& res, const char* csp)
+{
+    res.set_header("X-Content-Type-Options", "nosniff");
+    res.set_header("X-Frame-Options", "DENY");
+    res.set_header("Cache-Control", "no-store");
+    res.set_header("Content-Security-Policy", csp);
+}
+
+static bool is_state_changing_method(const std::string& method)
+{
+    return method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE";
+}
+
+// Extracts the hostname from an authority ("127.0.0.1:8080", "[::1]:8080",
+// "localhost"). Returns an empty string for malformed values.
+static std::string hostname_from_authority(const std::string& authority)
+{
+    if (authority.empty())
+        return {};
+
+    if (authority[0] == '[')
+    {
+        const std::string::size_type close = authority.find(']');
+        if (close == std::string::npos)
+            return {};
+        if (close + 1 < authority.size() && authority[close + 1] != ':')
+            return {};
+        return authority.substr(1, close - 1);
+    }
+
+    const std::string::size_type colon = authority.find(':');
+    if (colon != std::string::npos && authority.find(':', colon + 1) != std::string::npos)
+        return {};
+    return authority.substr(0, colon);
+}
+
+// DNS rebinding: a foreign domain resolving to 127.0.0.1 still carries its own
+// name in the Host header, so only loopback names are accepted.
+// allowed_hosts adds names the operator opted into, e.g. a reverse proxy's public name.
+static bool is_allowed_loopback_host_header(const httplib::Request& req,
+                                            const std::vector<std::string>& allowed_hosts)
+{
+    const std::string hostname =
+        util::to_lower_ascii(hostname_from_authority(req.get_header_value("Host")));
+    return is_loopback_request_host(hostname) ||
+           std::find(allowed_hosts.begin(), allowed_hosts.end(), hostname) != allowed_hosts.end();
+}
+
+// Fetch metadata: browsers mark requests from other sites; "none" means the
+// user navigated directly. Non-browser clients send no header at all.
+static bool is_cross_site_fetch(const httplib::Request& req)
+{
+    if (!req.has_header("Sec-Fetch-Site"))
+        return false;
+
+    const std::string site = util::to_lower_ascii(req.get_header_value("Sec-Fetch-Site"));
+    return site != "same-origin" && site != "none";
+}
+
+// Browsers send Origin on every non-GET request (including "null" from
+// sandboxed or privacy-restricted contexts). It must name this server.
+static bool is_foreign_origin(const httplib::Request& req)
+{
+    if (!req.has_header("Origin"))
+        return false;
+
+    const std::string origin = util::to_lower_ascii(req.get_header_value("Origin"));
+    const std::string host = util::to_lower_ascii(req.get_header_value("Host"));
+    return host.empty() || (origin != "http://" + host && origin != "https://" + host);
+}
+
+// Cross-site HTML forms and no-cors fetches can only send text/plain,
+// multipart/form-data or application/x-www-form-urlencoded without a preflight.
+// Requiring JSON for any request with a body (or an explicit Content-Type)
+// rules them out. Bodyless requests without Content-Type stay allowed.
+static bool has_acceptable_content_type(const httplib::Request& req)
+{
+    if (req.has_header("Content-Type"))
+        return has_json_content_type(req);
+    return req.body.empty();
+}
+
+static httplib::Server::HandlerResponse apply_request_origin_guard(
+    bool enforce_loopback_host, const std::vector<std::string>& allowed_hosts,
+    const httplib::Request& req, httplib::Response& res)
+{
+    using HR = httplib::Server::HandlerResponse;
+
+    if (enforce_loopback_host && !is_allowed_loopback_host_header(req, allowed_hosts))
+    {
+        set_json_error(res, JsonError{http_status::FORBIDDEN, "invalid_host",
+                                      "Host header not allowed"});
+        return HR::Handled;
+    }
+
+    if (!is_api_route(req.path) || !is_state_changing_method(req.method))
+        return HR::Unhandled;
+
+    if (is_cross_site_fetch(req) || is_foreign_origin(req))
+    {
+        set_json_error(res, JsonError{http_status::FORBIDDEN, "forbidden",
+                                      "cross-origin request rejected"});
+        return HR::Handled;
+    }
+
+    if (!has_acceptable_content_type(req))
+    {
+        set_json_error(res, JsonError{http_status::UNSUPPORTED_MEDIA_TYPE,
+                                      "unsupported_media_type",
+                                      "Content-Type must be application/json"});
+        return HR::Handled;
+    }
+
+    return HR::Unhandled;
+}
+
 namespace
 {
-static const double AUTH_RATE_REFILL    = 5.0;
-static const double AUTH_RATE_MAX       = 20.0;
+static const double AUTH_RATE_REFILL    = 10.0;
+static const double AUTH_RATE_MAX       = 40.0;
 static const double UNAUTH_RATE_REFILL  = 1.0;
 static const double UNAUTH_RATE_MAX     = 5.0;
 
 static const int    LOCKOUT_FAIL_THRESHOLD  = 5;
 static const double LOCKOUT_WINDOW_SECONDS  = 60.0;
 static const double LOCKOUT_DURATION_SECONDS = 300.0;
+
+// Upper bound for tracked clients. Idle entries are dropped once it is reached;
+// if every entry is still active, new clients share one overflow entry.
+static const std::size_t MAX_TRACKED_CLIENTS = 1024;
+static const char        OVERFLOW_CLIENT_KEY[] = "";
 
 struct TokenBucket
 {
@@ -53,6 +178,8 @@ struct TokenBucket
 
 static void refill_bucket(TokenBucket& b, std::chrono::steady_clock::time_point now)
 {
+    if (now <= b.last_refill)
+        return;
     const std::chrono::duration<double> elapsed = now - b.last_refill;
     b.tokens = std::min(b.max_tokens, b.tokens + elapsed.count() * b.refill_per_second);
     b.last_refill = now;
@@ -85,44 +212,98 @@ static void record_auth_failure(LockoutState& ls, std::chrono::steady_clock::tim
                                     std::chrono::duration<double>(LOCKOUT_DURATION_SECONDS));
 }
 
-struct RateLimiter
+// Rate limit and lockout state of one remote address, so that a client with a
+// wrong key cannot lock out everyone else.
+struct ClientLimits
 {
-    std::mutex   mutex;
-    TokenBucket  auth_bucket{AUTH_RATE_MAX, AUTH_RATE_REFILL};
-    TokenBucket  unauth_bucket{UNAUTH_RATE_MAX, UNAUTH_RATE_REFILL};
-    LockoutState lockout;
-
-    bool allow_authenticated(std::chrono::steady_clock::time_point now);
-    bool allow_unauthenticated(std::chrono::steady_clock::time_point now);
-    void record_failure(std::chrono::steady_clock::time_point now);
+    TokenBucket                           auth_bucket{AUTH_RATE_MAX, AUTH_RATE_REFILL};
+    TokenBucket                           unauth_bucket{UNAUTH_RATE_MAX, UNAUTH_RATE_REFILL};
+    LockoutState                          lockout;
+    std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
 };
 
-bool RateLimiter::allow_authenticated(std::chrono::steady_clock::time_point now)
+// An entry is idle when dropping it changes nothing: both buckets would be
+// full again, no lockout is active and no failure is still inside the window.
+static bool is_idle_client(const ClientLimits& c, std::chrono::steady_clock::time_point now)
+{
+    const std::chrono::duration<double> idle = now - c.last_seen;
+    const double refill_seconds = std::max(AUTH_RATE_MAX / AUTH_RATE_REFILL,
+                                           UNAUTH_RATE_MAX / UNAUTH_RATE_REFILL);
+    return idle.count() >= std::max(refill_seconds, LOCKOUT_WINDOW_SECONDS) &&
+           now >= c.lockout.locked_until;
+}
+
+struct RateLimiter
+{
+    std::mutex                          mutex;
+    std::map<std::string, ClientLimits> clients;
+
+    // Caller must hold `mutex` (tests call it single-threaded).
+    ClientLimits& client(const std::string& key, std::chrono::steady_clock::time_point now);
+
+    bool allow_authenticated(const std::string& key, std::chrono::steady_clock::time_point now);
+    bool allow_unauthenticated(const std::string& key, std::chrono::steady_clock::time_point now);
+    void record_failure(const std::string& key, std::chrono::steady_clock::time_point now);
+};
+
+ClientLimits& RateLimiter::client(const std::string& key,
+                                  std::chrono::steady_clock::time_point now)
+{
+    std::map<std::string, ClientLimits>::iterator it = clients.find(key);
+    if (it == clients.end() && clients.size() >= MAX_TRACKED_CLIENTS)
+    {
+        for (std::map<std::string, ClientLimits>::iterator c = clients.begin();
+             c != clients.end();)
+        {
+            if (is_idle_client(c->second, now))
+                c = clients.erase(c);
+            else
+                ++c;
+        }
+    }
+
+    if (it == clients.end())
+    {
+        const std::string slot =
+            clients.size() < MAX_TRACKED_CLIENTS ? key : std::string(OVERFLOW_CLIENT_KEY);
+        it = clients.emplace(slot, ClientLimits{}).first;
+    }
+
+    it->second.last_seen = now;
+    return it->second;
+}
+
+bool RateLimiter::allow_authenticated(const std::string& key,
+                                      std::chrono::steady_clock::time_point now)
 {
     std::lock_guard<std::mutex> lock(mutex);
-    refill_bucket(auth_bucket, now);
-    if (auth_bucket.tokens < 1.0)
+    TokenBucket& bucket = client(key, now).auth_bucket;
+    refill_bucket(bucket, now);
+    if (bucket.tokens < 1.0)
         return false;
-    auth_bucket.tokens -= 1.0;
+    bucket.tokens -= 1.0;
     return true;
 }
 
-bool RateLimiter::allow_unauthenticated(std::chrono::steady_clock::time_point now)
+bool RateLimiter::allow_unauthenticated(const std::string& key,
+                                        std::chrono::steady_clock::time_point now)
 {
     std::lock_guard<std::mutex> lock(mutex);
-    if (is_in_lockout(lockout, now))
+    ClientLimits& limits = client(key, now);
+    if (is_in_lockout(limits.lockout, now))
         return false;
-    refill_bucket(unauth_bucket, now);
-    if (unauth_bucket.tokens < 1.0)
+    refill_bucket(limits.unauth_bucket, now);
+    if (limits.unauth_bucket.tokens < 1.0)
         return false;
-    unauth_bucket.tokens -= 1.0;
+    limits.unauth_bucket.tokens -= 1.0;
     return true;
 }
 
-void RateLimiter::record_failure(std::chrono::steady_clock::time_point now)
+void RateLimiter::record_failure(const std::string& key,
+                                 std::chrono::steady_clock::time_point now)
 {
     std::lock_guard<std::mutex> lock(mutex);
-    record_auth_failure(lockout, now);
+    record_auth_failure(client(key, now).lockout, now);
 }
 } // namespace
 
@@ -231,12 +412,14 @@ static httplib::Server::HandlerResponse apply_auth_guard(
         return HR::Unhandled;
 
     const auto now = std::chrono::steady_clock::now();
+    // Per remote address: one client with a wrong key must not lock out the others.
+    const std::string& client = req.remote_addr;
     const AuthEvaluation auth =
         evaluate_auth_request(req, admin_hash, restricted_hash, open_mode);
 
-    // 1. Rate limit — bucket selected by auth status
-    const bool allowed = auth.authenticated ? rate_limiter.allow_authenticated(now)
-                                            : rate_limiter.allow_unauthenticated(now);
+    // 1. Rate limit — per-client bucket selected by auth status
+    const bool allowed = auth.authenticated ? rate_limiter.allow_authenticated(client, now)
+                                            : rate_limiter.allow_unauthenticated(client, now);
     if (!allowed)
     {
         set_json_error(res, JsonError{http_status::TOO_MANY_REQUESTS, "too_many_requests",
@@ -257,7 +440,7 @@ static httplib::Server::HandlerResponse apply_auth_guard(
     {
         if (!auth.restricted_valid)
         {
-            rate_limiter.record_failure(now);
+            rate_limiter.record_failure(client, now);
             set_json_error(res,
                            JsonError{http_status::UNAUTHORIZED, "unauthorized", "unauthorized"});
             return HR::Handled;
@@ -276,7 +459,7 @@ static httplib::Server::HandlerResponse apply_auth_guard(
     {
         if (!auth.admin_valid)
         {
-            rate_limiter.record_failure(now);
+            rate_limiter.record_failure(client, now);
             set_json_error(res,
                            JsonError{http_status::UNAUTHORIZED, "unauthorized", "unauthorized"});
             return HR::Handled;
@@ -289,7 +472,7 @@ static httplib::Server::HandlerResponse apply_auth_guard(
         return HR::Unhandled;
 
     // 6. No credentials → 401
-    rate_limiter.record_failure(now);
+    rate_limiter.record_failure(client, now);
     set_json_error(res, JsonError{http_status::UNAUTHORIZED, "unauthorized", "unauthorized"});
     return HR::Handled;
 }
@@ -311,10 +494,7 @@ void register_api_response_headers(httplib::Server& svr, const AppConfig& config
     svr.set_post_routing_handler(
         [tls_enabled](const httplib::Request&, httplib::Response& res)
         {
-            res.set_header("X-Content-Type-Options", "nosniff");
-            res.set_header("X-Frame-Options", "DENY");
-            res.set_header("Cache-Control", "no-store");
-            res.set_header("Content-Security-Policy", CSP_POLICY);
+            set_security_headers(res, CSP_POLICY);
             if (tls_enabled)
                 res.set_header("Strict-Transport-Security", "max-age=31536000");
         });
@@ -326,14 +506,40 @@ void register_api_key_guard(httplib::Server& svr, const AppConfig& config,
     const std::string admin_hash = auth_config.admin_api_key_hash;
     const std::string restricted_hash = auth_config.restricted_api_key_hash;
     const bool open_mode = is_open_mode(config.host, auth_config);
+    // Non-loopback binds require an admin key and TLS, and may be reached under
+    // any LAN name, so the Host allowlist only applies to loopback binds.
+    const bool enforce_loopback_host = is_loopback_host(config.host);
+    const std::vector<std::string> allowed_hosts = config.allowed_hosts;
     std::shared_ptr<RateLimiter> rate_limiter = std::make_shared<RateLimiter>();
     svr.set_pre_routing_handler(
-        [admin_hash, restricted_hash, open_mode, rate_limiter](const httplib::Request& req,
-                                                               httplib::Response& res)
+        [admin_hash, restricted_hash, open_mode, enforce_loopback_host, allowed_hosts,
+         rate_limiter](const httplib::Request& req, httplib::Response& res)
         {
+            using HR = httplib::Server::HandlerResponse;
+            // httplib allows a single pre-routing handler: origin/Host checks run
+            // first so rejected browser requests never drain the rate limiter.
+            if (apply_request_origin_guard(enforce_loopback_host, allowed_hosts, req, res) ==
+                HR::Handled)
+                return HR::Handled;
             return apply_auth_guard(*rate_limiter, admin_hash, restricted_hash, open_mode,
                                     req, res);
         });
+}
+
+void register_setup_request_guard(httplib::Server& svr)
+{
+    // The setup server always binds to loopback and has no authentication, so it
+    // ignores allowed_hosts: remote setup goes through an SSH tunnel.
+    svr.set_pre_routing_handler(
+        [](const httplib::Request& req, httplib::Response& res)
+        { return apply_request_origin_guard(true, std::vector<std::string>(), req, res); });
+
+    // The /api/setup response carries freshly generated keys: never cache it and
+    // never let another page frame the wizard. No full CSP here, because the
+    // wizard probes the new server on another origin after setup.
+    svr.set_post_routing_handler(
+        [](const httplib::Request&, httplib::Response& res)
+        { set_security_headers(res, "frame-ancestors 'none'"); });
 }
 
 void MethodRegistry::add(const std::string& pattern, const std::string& method)

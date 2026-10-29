@@ -5,8 +5,10 @@
 
 #include <cstdio>
 
-// Auth is enforced by the global pre-routing guard in api_guard.cpp;
-// no per-route auth check is needed here.
+// Shared by the main server and the setup server. On the main server auth is
+// enforced by the global pre-routing guard in api_guard.cpp; the setup server
+// only has its origin guard. Both restart afterwards, and without a config file
+// the restart lands in the setup wizard.
 static void handle_setup_reset(httplib::Response& res,
                                 const std::string& config_path,
                                 Logger& logger)

@@ -168,11 +168,6 @@ static void handle_settings_get_request(httplib::Response& res, const SettingsRo
         });
 }
 
-static bool validate_settings_request(const httplib::Request& req, httplib::Response& res)
-{
-    return validate_json_post_request(req, res);
-}
-
 static void handle_settings_save_result(httplib::Response& res,
                                         const SettingsService::SaveResult& result)
 {
@@ -303,7 +298,7 @@ static void handle_settings_post_request(const httplib::Request& req, httplib::R
         res, ApiRequestContext{"POST /api/settings", ctx.logger},
         [&req, &res, &ctx]()
         {
-            if (!validate_settings_request(req, res))
+            if (reject_if_body_too_large(req, res))
                 return;
 
             const SettingsService::Settings current_settings = ctx.service.load_settings();
